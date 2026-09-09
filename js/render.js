@@ -150,14 +150,10 @@ const Render = (() => {
 
     /* --- 选中态 --- */
     if (o.selected) {
-      ctx.save();
-      ctx.shadowColor = "rgba(90,140,255,0.9)";
-      ctx.shadowBlur = U * 0.10;
       roundRectPath(ctx, g.x, g.y, g.w, g.h, g.r);
-      ctx.strokeStyle = "#6ea8ff";
-      ctx.lineWidth = Math.max(1.5, U * 0.028);
+      ctx.strokeStyle = "#d9480f";
+      ctx.lineWidth = Math.max(2, U * 0.035);
       ctx.stroke();
-      ctx.restore();
     }
   }
 

@@ -16,6 +16,7 @@
     plateColor: "#23252f",
     mode: "flat",          // flat | 3d
     orbit: { yaw: 0.5, elev: 0.9, zoom: 1 },
+    designVersion: 0,      // 设计变更计数（用于 3D 顶面纹理缓存失效）
     dragging: false,
     _down: null,
     _cssW: 0,
@@ -110,6 +111,7 @@
     }
 
     state.selected = null;
+    state.designVersion++;
     fitCanvas();
     syncPanel();
     markDirty();
@@ -141,11 +143,12 @@
     markDirty();
   }
 
-  /* ---------- 3D 取景 ---------- */
+  /* ---------- 3D 取景（透视） ---------- */
   function compute3DFit(cssW, cssH) {
     const { W, H } = layoutBounds(state.keys);
+    const dist = Preview3D.distFor(W, H);
     const pm = 0.35, top = 0.65, bot = -0.4;
-    const P = Preview3D.makeProjector(state.orbit.yaw, state.orbit.elev, 1, 0, 0);
+    const P = Preview3D.makeProjector(state.orbit.yaw, state.orbit.elev, 1, 0, 0, dist);
     const cs = [
       [-pm, -pm, top], [W + pm, -pm, top], [W + pm, H + pm, top], [-pm, H + pm, top],
       [-pm, -pm, bot], [W + pm, -pm, bot], [W + pm, H + pm, bot], [-pm, H + pm, bot]
@@ -155,7 +158,7 @@
     const minY = Math.min(...ys), maxY = Math.max(...ys);
     const scale = Math.min((cssW - 24) / (maxX - minX), (cssH - 24) / (maxY - minY));
     return {
-      scale,
+      scale, dist,
       cx: cssW / 2 - (minX + maxX) / 2 * scale,
       cy: cssH / 2 - (minY + maxY) / 2 * scale
     };
@@ -165,7 +168,7 @@
     const fit = compute3DFit(state._cssW, state._cssH);
     return Preview3D.makeProjector(
       state.orbit.yaw, state.orbit.elev,
-      fit.scale * state.orbit.zoom, fit.cx, fit.cy
+      fit.scale * state.orbit.zoom, fit.cx, fit.cy, fit.dist
     );
   }
 
@@ -185,9 +188,11 @@
           scale: fit.scale * state.orbit.zoom,
           cx: fit.cx,
           cy: fit.cy,
+          dist: fit.dist,
           plateColor: state.plateColor,
           selectedIndex: state.selected,
-          getImg
+          getImg,
+          version: state.designVersion
         });
       } else {
         ctx.save();
@@ -362,6 +367,7 @@
     reader.onload = () => {
       const d = state.designs[index] || (state.designs[index] = defaultDesign(state.keys[index]));
       d.img = { data: reader.result, scale: 1, rot: 0, ox: 0, oy: 0 };
+      state.designVersion++;
       state.selected = index;
       syncPanel();
       markDirty();
@@ -381,6 +387,7 @@
   $("btnRemoveImg").addEventListener("click", () => {
     const d = curDesign(); if (!d) return;
     d.img = null;
+    state.designVersion++;
     syncPanel(); markDirty(); autosave();
   });
 
@@ -433,6 +440,7 @@
     el.addEventListener("input", () => {
       const d = curDesign(); if (!d) return;
       field(d, el);
+      state.designVersion++;
       markDirty();
       autosave();
     });
@@ -482,6 +490,7 @@
         img: snapshot.img ? { ...snapshot.img } : null
       };
     });
+    state.designVersion++;
     markDirty(); autosave();
     toast("已应用到全部键帽");
   });
@@ -489,11 +498,13 @@
   $("btnResetKey").addEventListener("click", () => {
     if (state.selected == null) return;
     state.designs[state.selected] = defaultDesign(state.keys[state.selected]);
+    state.designVersion++;
     syncPanel(); markDirty(); autosave();
   });
 
   $("btnClear").addEventListener("click", () => {
     state.keys.forEach((k, i) => { state.designs[i] = defaultDesign(k); });
+    state.designVersion++;
     markDirty(); autosave();
     toast("已清空全部设计");
   });
@@ -562,7 +573,8 @@
   function exportBoard3D() {
     const { W, H } = layoutBounds(state.keys);
     const S = 260, m = 80, pm = 0.35, top = 0.65, bot = -0.4;
-    const P0 = Preview3D.makeProjector(state.orbit.yaw, state.orbit.elev, S, 0, 0);
+    const dist = Preview3D.distFor(W, H);
+    const P0 = Preview3D.makeProjector(state.orbit.yaw, state.orbit.elev, S, 0, 0, dist);
     const cs = [
       [-pm, -pm, top], [W + pm, -pm, top], [W + pm, H + pm, top], [-pm, H + pm, top],
       [-pm, -pm, bot], [W + pm, -pm, bot], [W + pm, H + pm, bot], [-pm, H + pm, bot]
@@ -581,8 +593,10 @@
       scale: S,
       cx: m - minX,
       cy: m - minY,
+      dist,
       plateColor: state.plateColor,
-      getImg
+      getImg,
+      version: state.designVersion
     });
     downloadCanvas(cv, `keycap-board-3d-${state.keys.length}keys.png`);
     toast("3D 视角整盘 PNG 已导出");
@@ -639,6 +653,7 @@
         state.designs[idx] = { ...base, ...d };
       }
     }
+    state.designVersion++;
     markDirty();
     return true;
   }
@@ -668,6 +683,124 @@
     e.target.value = "";
   });
 
+  /* ---------- 单键 3D 预览卡 ---------- */
+  const k3 = { yaw: 0.7, elev: 0.72, zoom: 1, dragging: false, last: null };
+  const k3Canvas = $("key3d");
+  const k3Ctx = k3Canvas.getContext("2d");
+  let k3Timer = 0;   // 交互后暂停自动旋转
+
+  function drawKey3d() {
+    const i = state.selected;
+    const show = i != null;
+    $("key3dEmpty").style.display = show ? "none" : "";
+    k3Canvas.style.display = show ? "" : "none";
+    $("btnExportKey3d").disabled = !show;
+    if (!show) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const cw = k3Canvas.clientWidth, ch = k3Canvas.clientHeight;
+    if (cw < 10 || ch < 10) return;
+    if (k3Canvas.width !== Math.round(cw * dpr) || k3Canvas.height !== Math.round(ch * dpr)) {
+      k3Canvas.width = Math.round(cw * dpr);
+      k3Canvas.height = Math.round(ch * dpr);
+    }
+    const g = k3Ctx;
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, cw, ch);
+
+    const k = state.keys[i], d = state.designs[i];
+    const dist = 5.5;
+
+    /* 取景：投影包围盒自适应 */
+    const ext = 1.0;
+    const P0 = Preview3D.makeProjector(k3.yaw, k3.elev, 1, 0, 0, dist);
+    const cs = [
+      [k.x - ext, k.y - ext, 0.65], [k.x + k.w + ext, k.y - ext, 0.65],
+      [k.x + k.w + ext, k.y + k.h + ext, 0.65], [k.x - ext, k.y + k.h + ext, 0.65],
+      [k.x - ext, k.y - ext, -0.6], [k.x + k.w + ext, k.y - ext, -0.6],
+      [k.x + k.w + ext, k.y + k.h + ext, -0.6], [k.x - ext, k.y + k.h + ext, -0.6]
+    ].map(c => P0(c[0], c[1], c[2]));
+    const xs = cs.map(p => p.x), ys = cs.map(p => p.y);
+    const bw = Math.max(...xs) - Math.min(...xs);
+    const bh = Math.max(...ys) - Math.min(...ys);
+    const focal = Math.min(cw / bw, ch / bh) * 0.88 * k3.zoom;
+
+    Preview3D.renderSingle(g, k, d, {
+      yaw: k3.yaw,
+      elev: k3.elev,
+      focal,
+      cx: cw / 2,
+      cy: ch / 2,
+      dist,
+      plateColor: state.plateColor,
+      getImg,
+      version: state.designVersion,
+      cacheKey: "s" + i
+    });
+  }
+
+  function loop3d() {
+    const i = state.selected;
+    if (i != null) {
+      if (!k3.dragging && Date.now() > k3Timer) k3.yaw += 0.006;   // 空闲自动旋转
+      drawKey3d();
+    }
+    requestAnimationFrame(loop3d);
+  }
+
+  k3Canvas.addEventListener("mousedown", e => {
+    k3.dragging = true;
+    k3.last = { x: e.clientX, y: e.clientY };
+  });
+  window.addEventListener("mousemove", e => {
+    if (!k3.dragging) return;
+    k3.yaw += (e.clientX - k3.last.x) * 0.008;
+    k3.elev = clamp(k3.elev + (e.clientY - k3.last.y) * 0.008, 0.1, 1.45);
+    k3.last = { x: e.clientX, y: e.clientY };
+    k3Timer = Date.now() + 2400;
+  });
+  window.addEventListener("mouseup", () => { k3.dragging = false; });
+  k3Canvas.addEventListener("wheel", e => {
+    e.preventDefault();
+    k3.zoom = clamp(k3.zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1), 0.5, 2.2);
+    k3Timer = Date.now() + 2400;
+  }, { passive: false });
+
+  $("btnExportKey3d").addEventListener("click", () => {
+    const i = state.selected;
+    if (i == null) { toast("请先选中一个键帽"); return; }
+    const k = state.keys[i];
+    const S = 720, m = 70, ext = 1.0, dist = 5.5;
+    const P0 = Preview3D.makeProjector(k3.yaw, k3.elev, S, 0, 0, dist);
+    const cs = [
+      [k.x - ext, k.y - ext, 0.65], [k.x + k.w + ext, k.y - ext, 0.65],
+      [k.x + k.w + ext, k.y + k.h + ext, 0.65], [k.x - ext, k.y + k.h + ext, 0.65],
+      [k.x - ext, k.y - ext, -0.6], [k.x + k.w + ext, k.y - ext, -0.6],
+      [k.x + k.w + ext, k.y + k.h + ext, -0.6], [k.x - ext, k.y + k.h + ext, -0.6]
+    ].map(c => P0(c[0], c[1], c[2]));
+    const xs = cs.map(p => p.x), ys = cs.map(p => p.y);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    const cv = document.createElement("canvas");
+    cv.width = Math.ceil(maxX - minX) + m * 2;
+    cv.height = Math.ceil(maxY - minY) + m * 2;
+    Preview3D.renderSingle(cv.getContext("2d"), k, state.designs[i], {
+      yaw: k3.yaw,
+      elev: k3.elev,
+      focal: S,
+      cx: m - minX,
+      cy: m - minY,
+      dist,
+      plateColor: state.plateColor,
+      getImg,
+      version: state.designVersion,
+      cacheKey: "s" + i
+    });
+    const name = (k.label || "space").replace(/[\\/:*?"<>|]/g, "_");
+    downloadCanvas(cv, `keycap-3d-${name}.png`);
+    toast("单键 3D PNG 已导出");
+  });
+
   /* ---------- 初始化 ---------- */
   window.addEventListener("resize", debounce(fitCanvas, 150));
 
@@ -676,6 +809,8 @@
     const saved = localStorage.getItem(SAVE_KEY);
     if (saved) restoreProject(JSON.parse(saved));
   } catch { /* 忽略 */ }
+  hintbar.innerHTML = HINT_FLAT;
   fitCanvas();
   requestAnimationFrame(frame);
+  requestAnimationFrame(loop3d);
 })();

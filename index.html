@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>键帽 DIY 工坊 · Keycap Studio</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='2' y='2' width='28' height='28' rx='7' fill='%235b6cff'/%3E%3Crect x='7' y='7' width='18' height='18' rx='5' fill='%23e9ecf5'/%3E%3C/svg%3E">
+<title>键帽工坊 · Keycap Studio</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231c1b1a'/%3E%3Crect x='6' y='6' width='20' height='20' rx='4' fill='%23d9480f'/%3E%3Crect x='10' y='10' width='12' height='12' rx='2.5' fill='%23f4f1ea'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -13,30 +13,30 @@
   <div class="brand">
     <span class="brand-logo"></span>
     <div class="brand-text">
-      <strong>键帽 DIY 工坊</strong>
-      <small>标准比例 · 上传图片 · 一键导出</small>
+      <strong>键帽工坊</strong>
+      <small class="mono">KEYCAP STUDIO · 1U = 19.05MM</small>
     </div>
   </div>
 
   <div class="toolbar">
     <label class="field">
-      <span>布局</span>
+      <span class="mono">布局</span>
       <select id="layoutSelect">
-        <option value="60">60%（61 键）</option>
+        <option value="60">60% · 61 键</option>
         <option value="tkl">87 键 TKL</option>
-        <option value="full">104 键 全尺寸</option>
+        <option value="full">104 键全尺寸</option>
       </select>
     </label>
 
-    <button id="btnImportKLE" class="btn ghost" title="导入 Keyboard Layout Editor (KLE) JSON 布局">导入 KLE 布局</button>
+    <button id="btnImportKLE" class="btn ghost" title="导入 Keyboard Layout Editor (KLE) JSON 布局">导入 KLE</button>
     <button id="btn3d" class="btn">3D 预览</button>
     <span class="sep"></span>
-    <button id="btnExportBoard" class="btn">导出整盘 PNG</button>
+    <button id="btnExportBoard" class="btn">导出整盘</button>
     <button id="btnExportKey" class="btn">导出当前键帽</button>
     <span class="sep"></span>
     <button id="btnSave" class="btn ghost">保存工程</button>
     <button id="btnLoad" class="btn ghost">载入工程</button>
-    <button id="btnClear" class="btn ghost danger">清空全部</button>
+    <button id="btnClear" class="btn ghost danger">清空</button>
   </div>
 </header>
 
@@ -45,33 +45,40 @@
     <div class="canvas-scroll" id="canvasScroll">
       <canvas id="board"></canvas>
     </div>
-    <div class="hintbar">
-      <span>单击选中键帽</span><i>·</i>
-      <span>双击 / 拖入图片上传</span><i>·</i>
-      <span>拖拽移动图片</span><i>·</i>
-      <span>滚轮缩放图片</span><i>·</i>
-      <span>Ctrl+V 粘贴图片到选中键</span>
+
+    <!-- 单键 3D 预览 -->
+    <div class="key3d-card" id="key3dCard">
+      <div class="key3d-head">
+        <span class="tag">单键 3D 预览</span>
+        <button id="btnExportKey3d" class="btn tiny" disabled>导出</button>
+      </div>
+      <div class="key3d-stage">
+        <canvas id="key3d"></canvas>
+        <div class="key3d-empty" id="key3dEmpty">在键盘中点击一颗键帽<br><small>拖拽旋转 · 滚轮缩放</small></div>
+      </div>
     </div>
+
+    <div class="hintbar" id="hintbar"></div>
   </section>
 
   <aside class="panel" id="panel">
-    <div class="panel-empty" id="panelEmpty">请先在左侧点击一个键帽</div>
+    <div class="panel-empty" id="panelEmpty">在左侧点击一个键帽开始设计</div>
 
     <div id="panelBody" style="display:none">
       <div class="key-head">
         <div class="key-title" id="keyTitle">A</div>
-        <div class="key-sub" id="keySub">1u · 19.05mm 标准</div>
+        <div class="key-sub mono" id="keySub">1u · 19.05mm</div>
       </div>
 
       <section class="card">
-        <h3>键帽颜色与图例</h3>
+        <h3 class="mono">键帽 / 图例</h3>
         <div class="row">
           <label class="field grow">
-            <span>键帽底色</span>
+            <span>底色</span>
             <input type="color" id="keyBg" value="#e9ecf5">
           </label>
           <label class="field grow">
-            <span>图例文字颜色</span>
+            <span>图例颜色</span>
             <div class="color-line">
               <input type="color" id="legendColor" value="#3a3d46">
               <button id="legendAuto" class="btn tiny ghost" title="跟随底色自动配色">自动</button>
@@ -83,22 +90,22 @@
           <input type="text" id="legendText" maxlength="16" placeholder="例如：A / Esc / 自定义">
         </label>
         <label class="field">
-          <span>图例大小 <b id="legendSizeVal">1.0x</b></span>
+          <span>图例大小 <b id="legendSizeVal">1.00x</b></span>
           <input type="range" id="legendSize" min="0.5" max="1.8" step="0.05" value="1">
         </label>
       </section>
 
       <section class="card">
-        <h3>图片贴图</h3>
+        <h3 class="mono">图片贴图</h3>
         <div class="upload-zone" id="uploadZone">
           <input type="file" id="imgInput" accept="image/*" hidden>
           <button class="btn primary" id="btnUpload">上传图片</button>
-          <small>支持 JPG / PNG / WebP，自动按键帽顶面等比铺满</small>
+          <small> JPG / PNG / WebP · 自动铺满键帽顶面<br>也可拖入图片或 Ctrl+V 粘贴</small>
         </div>
 
         <div id="imgControls">
           <label class="field">
-            <span>缩放 <b id="imgScaleVal">1.0x</b></span>
+            <span>缩放 <b id="imgScaleVal">1.00x</b></span>
             <input type="range" id="imgScale" min="0.2" max="4" step="0.01" value="1">
           </label>
           <label class="field">
@@ -106,11 +113,11 @@
             <input type="range" id="imgRot" min="-180" max="180" step="1" value="0">
           </label>
           <label class="field">
-            <span>水平位置 <b id="imgXVal">0</b></span>
+            <span>水平位置 <b id="imgXVal">0.00</b></span>
             <input type="range" id="imgX" min="-1" max="1" step="0.01" value="0">
           </label>
           <label class="field">
-            <span>垂直位置 <b id="imgYVal">0</b></span>
+            <span>垂直位置 <b id="imgYVal">0.00</b></span>
             <input type="range" id="imgY" min="-1" max="1" step="0.01" value="0">
           </label>
           <button class="btn ghost small" id="btnRemoveImg">移除图片</button>
@@ -118,7 +125,7 @@
       </section>
 
       <section class="card">
-        <h3>快捷操作</h3>
+        <h3 class="mono">快捷操作</h3>
         <div class="btn-grid">
           <button class="btn ghost small" id="btnApplyAll">此设计应用到全部键</button>
           <button class="btn ghost small" id="btnResetKey">重置此键</button>
@@ -127,7 +134,7 @@
     </div>
 
     <section class="card global-card">
-      <h3>全局设置</h3>
+      <h3 class="mono">全局</h3>
       <label class="field">
         <span>键盘底板颜色</span>
         <input type="color" id="plateColor" value="#23252f">

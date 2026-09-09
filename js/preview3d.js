@@ -1,66 +1,61 @@
 /* =========================================================
- * 3D 键盘预览（纯 Canvas，正交投影 + 画家算法）
- * - 键帽为带锥度的立体帽（顶面小于底面，符合实物比例）
- * - 支持偏航 / 俯仰旋转、点击拾取、实时反映设计数据
+ * 3D 键盘预览（纯 Canvas，透视投影 + 画家算法）
+ * - 真实透视：透视除法，近大远小；按相机位置判定面可见性
+ * - 键帽顶面贴图：离屏纹理 + 三角形仿射映射（透视校正近似）
+ * - 支持整盘渲染与单颗键帽渲染（共享同一套几何）
  * ========================================================= */
 
 const Preview3D = (() => {
 
   const CAP_H_BASE = 0.42;   // 键帽高度（u）
   const TI = 0.125;          // 顶面内缩（与平面渲染一致）
+  const PXU = 260;           // 顶面纹理分辨率（px / u）
 
-  const spriteCache = new Map();
-
-  function legendSprite(text, color) {
-    const key = text + "|" + color;
-    if (spriteCache.has(key)) return spriteCache.get(key);
-    const fs = 64, pad = 10;
-    const measure = document.createElement("canvas").getContext("2d");
-    measure.font = `600 ${fs}px Inter, "Segoe UI", "Microsoft YaHei", sans-serif`;
-    const tw = Math.ceil(measure.measureText(text).width);
-    const c = document.createElement("canvas");
-    c.width = tw + pad * 2;
-    c.height = fs + pad * 2;
-    const g = c.getContext("2d");
-    g.font = measure.font;
-    g.fillStyle = color;
-    g.textBaseline = "top";
-    g.fillText(text, pad, pad);
-    spriteCache.set(key, c);
-    return c;
-  }
+  let texCache = new Map();
+  let texVersion = null;
 
   function capHeight(k) {
     return CAP_H_BASE + (k.h > 1 ? 0.1 : 0) + (k.w >= 2.75 ? 0.03 : 0);
   }
 
-  /* 正交投影器：世界坐标(u) → 屏幕坐标 */
-  function makeProjector(yaw, elev, scale, cx, cy) {
+  /* 相机距离：随布局尺寸变化（u） */
+  function distFor(W, H) {
+    return Math.hypot(W, H) * 1.5 + 5;
+  }
+
+  /* ---------- 透视投影 ----------
+   * 相机位于方位角 yaw、仰角 elev、距离 dist 处，看向原点。
+   * focal 为焦距（像素），dist 为相机到目标距离（u） */
+  function makeProjector(yaw, elev, focal, cx, cy, dist) {
     const ca = Math.cos(yaw), sa = Math.sin(yaw);
     const ce = Math.cos(elev), se = Math.sin(elev);
     return (X, Y, Z) => {
       const x1 = X * ca - Y * sa;
       const y1 = X * sa + Y * ca;
+      const depth = y1 * ce + Z * se;              // 相机轴向深度
+      const k = focal / (dist - depth);
       return {
-        x: cx + x1 * scale,
-        y: cy + (y1 * se - Z * ce) * scale,
-        d: y1 * ce + Z * se            // 面向相机深度（越大越近）
+        x: cx + x1 * k,
+        y: cy - (y1 * se - Z * ce) * k,
+        d: depth
       };
     };
   }
 
-  /* 侧面可见性判定（世界 XY 法线） */
-  function makeVis(yaw, elev) {
+  /* 面可见性：相机是否位于面的外侧（法线 + 面中心，世界 XY） */
+  function makeVis(yaw, elev, dist) {
     const ca = Math.cos(yaw), sa = Math.sin(yaw);
-    const ce = Math.cos(elev);
-    return (nx, ny) => {
+    const camY = Math.cos(elev) * dist;
+    return (nx, ny, fx, fy) => {
       const nx1 = nx * ca - ny * sa;
       const ny1 = nx * sa + ny * ca;
-      return (nx1 * sa + ny1 * ca) * ce > 0.001;
+      const fx1 = fx * ca - fy * sa;
+      const fy1 = fx * sa + fy * ca;
+      return -fx1 * nx1 + (camY - fy1) * ny1 > 0;
     };
   }
 
-  /* 按旋转后法线做明暗着色（光源自屏幕左上） */
+  /* 按旋转后法线着色（光源自屏幕左上） */
   function faceColor(bg, nx, ny, yaw) {
     const ca = Math.cos(yaw), sa = Math.sin(yaw);
     const nx1 = nx * ca - ny * sa;
@@ -77,18 +72,146 @@ const Preview3D = (() => {
     ctx.closePath();
   }
 
-  /* 平板（底板 / 外壳） */
+  /* ---------- 顶面纹理 ---------- */
+  function roundRect(g, x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    g.beginPath();
+    g.moveTo(x + r, y);
+    g.arcTo(x + w, y, x + w, y + r, r);
+    g.lineTo(x + w, y + h - r);
+    g.arcTo(x + w, y + h, x + w - r, y + h, r);
+    g.lineTo(x + r, y + h);
+    g.arcTo(x, y + h, x, y + h - r, r);
+    g.lineTo(x, y + r);
+    g.arcTo(x, y, x + r, y, r);
+    g.closePath();
+  }
+
+  function topTexture(k, d, getImg, cacheKey, version) {
+    if (texVersion !== version) { texCache.clear(); texVersion = version; }
+    if (texCache.has(cacheKey)) return texCache.get(cacheKey);
+
+    const tw = k.w - 2 * TI, th = k.h - 2 * TI;
+    const TW = Math.max(8, Math.round(tw * PXU));
+    const TH = Math.max(8, Math.round(th * PXU));
+    const c = document.createElement("canvas");
+    c.width = TW; c.height = TH;
+    const g = c.getContext("2d");
+
+    const bg = (d && d.bg) || "#e9ecf5";
+    const r = 0.09 * PXU;
+
+    roundRect(g, 0, 0, TW, TH, r);
+    g.fillStyle = bg;
+    g.fill();
+
+    /* 图片贴图 */
+    let imgReady = true;
+    if (d && d.img && d.img.data) {
+      const el = getImg(d.img.data);
+      if (el && el.complete && el.naturalWidth > 0) {
+        g.save();
+        roundRect(g, 0, 0, TW, TH, r);
+        g.clip();
+        const base = Math.max(TW / el.naturalWidth, TH / el.naturalHeight);
+        const s = base * (d.img.scale || 1);
+        g.translate(TW / 2 + (d.img.ox || 0) * TW, TH / 2 + (d.img.oy || 0) * TH);
+        g.rotate((d.img.rot || 0) * Math.PI / 180);
+        g.drawImage(el, -el.naturalWidth * s / 2, -el.naturalHeight * s / 2, el.naturalWidth * s, el.naturalHeight * s);
+        g.restore();
+      } else {
+        imgReady = false;
+      }
+    }
+
+    /* 光影 */
+    g.save();
+    roundRect(g, 0, 0, TW, TH, r);
+    g.clip();
+    const gr = g.createLinearGradient(0, 0, 0, TH);
+    gr.addColorStop(0, "rgba(255,255,255,0.14)");
+    gr.addColorStop(0.5, "rgba(255,255,255,0)");
+    gr.addColorStop(1, "rgba(0,0,0,0.08)");
+    g.fillStyle = gr;
+    g.fillRect(0, 0, TW, TH);
+    g.restore();
+
+    /* 图例 */
+    const legend = d && d.legend != null ? d.legend : k.label;
+    if (legend) {
+      const color = (d && d.legendColor) || (Render.luminance(bg) > 0.55 ? "#3a3d46" : "#e8eaf2");
+      const fs = Math.min(TH * 0.38 * ((d && d.legendSize) || 1), 0.30 * PXU);
+      g.fillStyle = color;
+      g.font = `600 ${Math.max(8, fs)}px Inter, "Segoe UI", "Microsoft YaHei", sans-serif`;
+      g.textAlign = "left";
+      g.textBaseline = "top";
+      const pad = Math.min(TW, TH) * 0.10;
+      g.fillText(legend, pad, pad * 0.9);
+    }
+
+    /* 内高光 */
+    roundRect(g, 0.75, 0.75, TW - 1.5, TH - 1.5, r - 0.75);
+    g.strokeStyle = "rgba(255,255,255,0.25)";
+    g.lineWidth = 1.5;
+    g.stroke();
+
+    const tex = { c, ready: imgReady };
+    if (imgReady) texCache.set(cacheKey, tex);
+    return tex;
+  }
+
+  /* 三角形仿射贴图（轻微外扩避免接缝） */
+  function mapTri(ctx, img, s, d) {
+    const [x0, y0, x1, y1, x2, y2] = s;
+    const u1 = { x: x1 - x0, y: y1 - y0 };
+    const u2 = { x: x2 - x0, y: y2 - y0 };
+    const v1 = { x: d[1].x - d[0].x, y: d[1].y - d[0].y };
+    const v2 = { x: d[2].x - d[0].x, y: d[2].y - d[0].y };
+    const det = u1.x * u2.y - u1.y * u2.x;
+    if (!det) return;
+    /* M = [v1 v2] · [u1 u2]⁻¹  （u: 源三角形基，v: 目标三角形基） */
+    const a = (v1.x * u2.y - v2.x * u1.y) / det;
+    const b = (v2.x * u1.x - v1.x * u2.x) / det;
+    const cc = (v1.y * u2.y - v2.y * u1.y) / det;
+    const dd = (v2.y * u1.x - v1.y * u2.x) / det;
+    const e = d[0].x - a * x0 - b * y0;
+    const f = d[0].y - cc * x0 - dd * y0;
+
+    const cen = { x: (d[0].x + d[1].x + d[2].x) / 3, y: (d[0].y + d[1].y + d[2].y) / 3 };
+    ctx.save();
+    ctx.beginPath();
+    d.forEach((p, i) => {
+      const dx = p.x - cen.x, dy = p.y - cen.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const ex = p.x + dx / len * 0.7, ey = p.y + dy / len * 0.7;
+      i ? ctx.lineTo(ex, ey) : ctx.moveTo(ex, ey);
+    });
+    ctx.closePath();
+    ctx.clip();
+    ctx.transform(a, b, cc, dd, e, f);
+    ctx.drawImage(img, 0, 0);
+    ctx.restore();
+  }
+
+  function drawTop(ctx, tex, p00, p10, p11, p01) {
+    const TW = tex.c.width, TH = tex.c.height;
+    mapTri(ctx, tex.c, [0, 0, TW, 0, TW, TH], [p00, p10, p11]);
+    mapTri(ctx, tex.c, [0, 0, TW, TH, 0, TH], [p00, p11, p01]);
+  }
+
+  /* ---------- 平板（底板） ---------- */
   function drawSlab(ctx, P, vis, x0, y0, x1, y1, zTop, zBot, color) {
     const b = [P(x0, y0, zBot), P(x1, y0, zBot), P(x1, y1, zBot), P(x0, y1, zBot)];
     const t = [P(x0, y0, zTop), P(x1, y0, zTop), P(x1, y1, zTop), P(x0, y1, zTop)];
+    const mcx = (x0 + x1) / 2, mcy = (y0 + y1) / 2;
     const sides = [
-      { n: [0, -1], q: [b[0], b[1], t[1], t[0]] },
-      { n: [1, 0], q: [b[1], b[2], t[2], t[1]] },
-      { n: [0, 1], q: [b[2], b[3], t[3], t[2]] },
-      { n: [-1, 0], q: [b[3], b[0], t[0], t[3]] }
+      { n: [0, -1], c: [mcx, y0], q: [b[0], b[1], t[1], t[0]] },
+      { n: [1, 0], c: [x1, mcy], q: [b[1], b[2], t[2], t[1]] },
+      { n: [0, 1], c: [mcx, y1], q: [b[2], b[3], t[3], t[2]] },
+      { n: [-1, 0], c: [x0, mcy], q: [b[3], b[0], t[0], t[3]] }
     ];
     for (const s of sides) {
-      if (!vis(s.n[0], s.n[1])) continue;
+      if (!vis(s.n[0], s.n[1], s.c[0], s.c[1])) continue;
       poly(ctx, s.q);
       ctx.fillStyle = Render.shade(color, -34);
       ctx.fill();
@@ -101,122 +224,65 @@ const Preview3D = (() => {
     ctx.stroke();
   }
 
-  /* 单个键帽（侧面梯形 + 顶面仿射贴图） */
-  function drawCap(ctx, k, d, P, vis, o, selected) {
+  /* ---------- 单个键帽 ---------- */
+  function drawCap(ctx, k, d, P, vis, o, selected, cacheKey) {
     const bg = (d && d.bg) || "#e9ecf5";
     const x = k.x, y = k.y, w = k.w, hh = k.h;
     const h3 = capHeight(k);
     const ti = TI;
 
-    /* 侧面 */
-    const bNW = P(x, y, 0), bNE = P(x + w, y, 0), bSE = P(x + w, y + hh, 0), bSW = P(x, y + hh, 0);
-    const tNW = P(x + ti, y + ti, h3), tNE = P(x + w - ti, y + ti, h3);
-    const tSE = P(x + w - ti, y + hh - ti, h3), tSW = P(x + ti, y + hh - ti, h3);
-
+    /* 侧面（按相机位置精确判定可见性） */
     const sideDefs = [
-      { n: [0, -1], q: [bNW, bNE, tNE, tNW] },
-      { n: [1, 0], q: [bNE, bSE, tSE, tNE] },
-      { n: [0, 1], q: [bSE, bSW, tSW, tSE] },
-      { n: [-1, 0], q: [bSW, bNW, tNW, tSW] }
+      { nx: 0, ny: -1, cx: x + w / 2, cy: y, b0: [x, y], b1: [x + w, y], t0: [x + ti, y + ti], t1: [x + w - ti, y + ti] },
+      { nx: 1, ny: 0, cx: x + w, cy: y + hh / 2, b0: [x + w, y], b1: [x + w, y + hh], t0: [x + w - ti, y + ti], t1: [x + w - ti, y + hh - ti] },
+      { nx: 0, ny: 1, cx: x + w / 2, cy: y + hh, b0: [x + w, y + hh], b1: [x, y + hh], t0: [x + w - ti, y + hh - ti], t1: [x + ti, y + hh - ti] },
+      { nx: -1, ny: 0, cx: x, cy: y + hh / 2, b0: [x, y + hh], b1: [x, y], t0: [x + ti, y + hh - ti], t1: [x + ti, y + ti] }
     ];
     for (const s of sideDefs) {
-      if (!vis(s.n[0], s.n[1])) continue;
-      poly(ctx, s.q);
-      ctx.fillStyle = faceColor(bg, s.n[0], s.n[1], o.yaw);
+      if (!vis(s.nx, s.ny, s.cx, s.cy)) continue;
+      poly(ctx, [P(s.b0[0], s.b0[1], 0), P(s.b1[0], s.b1[1], 0), P(s.t1[0], s.t1[1], h3), P(s.t0[0], s.t0[1], h3)]);
+      ctx.fillStyle = faceColor(bg, s.nx, s.ny, o.yaw);
       ctx.fill();
     }
 
-    /* 顶面（仿射变换：背景 / 图片 / 光影 / 图例） */
-    const tw = w - 2 * ti, th = hh - 2 * ti;
-    const p00 = tNW, p10 = tNE, p01 = tSW;
-    const ux = { x: p10.x - p00.x, y: p10.y - p00.y };
-    const vx = { x: p01.x - p00.x, y: p01.y - p00.y };
-
-    ctx.save();
-    ctx.transform(ux.x / tw, ux.y / tw, vx.x / th, vx.y / th, p00.x, p00.y);
-
-    Render.roundRectPath(ctx, 0, 0, tw, th, 0.09);
-    ctx.fillStyle = bg;
-    ctx.fill();
-
-    if (d && d.img && d.img.data) {
-      const el = o.getImg(d.img.data);
-      if (el && el.complete && el.naturalWidth > 0) {
-        const iw = el.naturalWidth, ih = el.naturalHeight;
-        ctx.save();
-        Render.roundRectPath(ctx, 0, 0, tw, th, 0.09);
-        ctx.clip();
-        const base = Math.max(tw / iw, th / ih);
-        const s = base * (d.img.scale || 1);
-        ctx.translate(tw / 2 + (d.img.ox || 0) * tw, th / 2 + (d.img.oy || 0) * th);
-        ctx.rotate((d.img.rot || 0) * Math.PI / 180);
-        ctx.drawImage(el, -iw * s / 2, -ih * s / 2, iw * s, ih * s);
-        ctx.restore();
-      }
+    /* 顶面（透视三角形贴图） */
+    const p00 = P(x + ti, y + ti, h3), p10 = P(x + w - ti, y + ti, h3);
+    const p11 = P(x + w - ti, y + hh - ti, h3), p01 = P(x + ti, y + hh - ti, h3);
+    const tex = topTexture(k, d, o.getImg, cacheKey, o.version);
+    if (tex.ready) {
+      drawTop(ctx, tex, p00, p10, p11, p01);
+    } else {
+      poly(ctx, [p00, p10, p11, p01]);
+      ctx.fillStyle = bg;
+      ctx.fill();
     }
-
-    /* 顶面光影 */
-    ctx.save();
-    Render.roundRectPath(ctx, 0, 0, tw, th, 0.09);
-    ctx.clip();
-    const gr = ctx.createLinearGradient(0, 0, 0, th);
-    gr.addColorStop(0, "rgba(255,255,255,0.14)");
-    gr.addColorStop(0.5, "rgba(255,255,255,0)");
-    gr.addColorStop(1, "rgba(0,0,0,0.08)");
-    ctx.fillStyle = gr;
-    ctx.fillRect(0, 0, tw, th);
-    ctx.restore();
-
-    /* 图例（离屏精灵，避免变换下字号过小） */
-    const legend = d && d.legend != null ? d.legend : k.label;
-    if (legend) {
-      const color = (d && d.legendColor) || (Render.luminance(bg) > 0.55 ? "#3a3d46" : "#e8eaf2");
-      const fsW = Math.min(th * 0.38 * ((d && d.legendSize) || 1), 0.30);
-      const spr = legendSprite(legend, color);
-      const dw = spr.width * (fsW / 64);
-      const dh = spr.height * (fsW / 64);
-      ctx.drawImage(spr, 0.07, 0.05, dw, dh);
-    }
-
-    Render.roundRectPath(ctx, 0, 0, tw, th, 0.09);
-    ctx.strokeStyle = "rgba(255,255,255,0.22)";
-    ctx.lineWidth = 0.015;
-    ctx.stroke();
-
-    ctx.restore();
 
     /* 选中态 */
     if (selected) {
-      ctx.save();
-      poly(ctx, [bNW, bNE, bSE, bSW]);
-      ctx.shadowColor = "rgba(90,140,255,0.9)";
-      ctx.shadowBlur = 10;
-      ctx.strokeStyle = "#6ea8ff";
-      ctx.lineWidth = Math.max(2, o.scale * 0.03);
+      poly(ctx, [p00, p10, p11, p01]);
+      ctx.strokeStyle = "#d9480f";
+      ctx.lineWidth = 3;
       ctx.stroke();
-      ctx.restore();
     }
   }
 
   /**
    * 渲染整块键盘
-   * o: { yaw, elev, scale, cx, cy, plateColor, selectedIndex, getImg, noShadow }
+   * o: { yaw, elev, scale(focal), cx, cy, dist, plateColor, selectedIndex, getImg, version, noShadow }
    */
   function render(ctx, keys, designs, o) {
     const { W, H } = layoutBounds(keys);
-    const P = makeProjector(o.yaw, o.elev, o.scale, o.cx, o.cy);
-    const vis = makeVis(o.yaw, o.elev);
+    const dist = o.dist || distFor(W, H);
+    const P = makeProjector(o.yaw, o.elev, o.scale, o.cx, o.cy, dist);
+    const vis = makeVis(o.yaw, o.elev, dist);
     const pm = 0.35;
 
-    /* 底板 */
     drawSlab(ctx, P, vis, -pm, -pm, W + pm, H + pm, 0, -0.4, o.plateColor || "#23252f");
 
-    /* 按深度排序（远 → 近） */
     const order = keys
       .map((k, i) => ({ k, i, d: P(k.x + k.w / 2, k.y + k.h / 2, 0.2).d }))
       .sort((a, b) => a.d - b.d);
 
-    /* 接触阴影 */
     if (!o.noShadow) {
       ctx.fillStyle = "rgba(0,0,0,0.30)";
       for (const { k } of order) {
@@ -231,8 +297,35 @@ const Preview3D = (() => {
     }
 
     for (const { k, i } of order) {
-      drawCap(ctx, k, designs[i], P, vis, o, i === o.selectedIndex);
+      drawCap(ctx, k, designs[i], P, vis, o, i === o.selectedIndex, "k" + i);
     }
+  }
+
+  /**
+   * 渲染单颗键帽（带小块底板），用于单键预览 / 导出
+   * o: { yaw, elev, focal, cx, cy, dist, plateColor, getImg, version, noShadow }
+   */
+  function renderSingle(ctx, k, d, o) {
+    const pm = 0.55;
+    const x0 = k.x - pm, y0 = k.y - pm, x1 = k.x + k.w + pm, y1 = k.y + k.h + pm;
+    const dist = o.dist || 6;
+    const P = makeProjector(o.yaw, o.elev, o.focal, o.cx, o.cy, dist);
+    const vis = makeVis(o.yaw, o.elev, dist);
+
+    drawSlab(ctx, P, vis, x0, y0, x1, y1, 0, -0.45, o.plateColor || "#23252f");
+
+    const cxc = k.x + k.w / 2, cyc = k.y + k.h / 2;
+    if (!o.noShadow) {
+      ctx.fillStyle = "rgba(0,0,0,0.30)";
+      poly(ctx, [
+        P(k.x - 0.06, k.y - 0.06, 0),
+        P(k.x + k.w + 0.06, k.y - 0.06, 0),
+        P(k.x + k.w + 0.06, k.y + k.h + 0.06, 0),
+        P(k.x - 0.06, k.y + k.h + 0.06, 0)
+      ]);
+      ctx.fill();
+    }
+    drawCap(ctx, k, d, P, vis, o, false, o.cacheKey || "single");
   }
 
   /* 点击拾取：取深度最大的命中顶面 */
@@ -267,5 +360,5 @@ const Preview3D = (() => {
     return true;
   }
 
-  return { render, pick, makeProjector, capHeight, TI };
+  return { render, renderSingle, pick, makeProjector, distFor, capHeight, TI };
 })();
