@@ -32,11 +32,11 @@ const Preview3D = (() => {
     return (X, Y, Z) => {
       const x1 = X * ca - Y * sa;
       const y1 = X * sa + Y * ca;
-      const depth = y1 * ce + Z * se;              // 相机轴向深度
+      const depth = y1 * ce + Z * se;              // 相机轴向深度（越大越靠近相机）
       const k = focal / (dist - depth);
       return {
         x: cx + x1 * k,
-        y: cy - (y1 * se - Z * ce) * k,
+        y: cy + (y1 * se - Z * ce) * k,            // 屏幕向下为正：近处(y1大)在下，高处(Z大)在上
         d: depth
       };
     };
