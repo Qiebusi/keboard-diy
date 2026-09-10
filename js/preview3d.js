@@ -36,6 +36,32 @@ function makeCapTexture(cv) {
   t.minFilter = THREE.LinearFilter;
   t.magFilter = THREE.LinearFilter;
   t.anisotropy = 4;
+  t.encoding = THREE.sRGBEncoding;
+  return t;
+}
+
+let _studioEnv = null;
+/* 程序化工作室环境贴图：柔和顶光 + 两侧灯带，供 PBR 材质反射 */
+function makeStudioEnv() {
+  if (_studioEnv) return _studioEnv;
+  const c = document.createElement("canvas");
+  c.width = 512; c.height = 256;
+  const g = c.getContext("2d");
+  const grad = g.createLinearGradient(0, 0, 0, 256);
+  grad.addColorStop(0, "#d8dee8");
+  grad.addColorStop(0.45, "#70747c");
+  grad.addColorStop(1, "#23252a");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 512, 256);
+  g.fillStyle = "rgba(255,255,255,0.85)";
+  g.fillRect(28, 16, 195, 62);
+  g.fillRect(298, 24, 172, 54);
+  g.fillStyle = "rgba(255,240,220,0.5)";
+  g.fillRect(180, 92, 210, 30);
+  const t = new THREE.CanvasTexture(c);
+  t.mapping = THREE.EquirectangularReflectionMapping;
+  t.encoding = THREE.sRGBEncoding;
+  _studioEnv = t;
   return t;
 }
 
@@ -225,10 +251,32 @@ class View {
       canvas, antialias: true, alpha: false, preserveDrawingBuffer: true
     });
     this.renderer.setClearColor(0xedeae3, 1);
-    /* 线性直通：颜色不做编码转换，所见即所得（与平面渲染一致） */
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.outputEncoding = THREE.sRGBEncoding;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.12;
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 400);
+
+    /* 灯光：主光（左前上，投射阴影）+ 冷补光（右后）+ 顶部逆光 + 环境光 */
+    const amb = new THREE.AmbientLight(0xffffff, 0.5);
+    const key = new THREE.DirectionalLight(0xfff1de, 1.15);
+    key.position.set(-6, 9, 5);
+    key.castShadow = true;
+    key.shadow.mapSize.set(2048, 2048);
+    key.shadow.camera.left = -14; key.shadow.camera.right = 14;
+    key.shadow.camera.top = 14; key.shadow.camera.bottom = -14;
+    key.shadow.camera.near = 1; key.shadow.camera.far = 40;
+    key.shadow.bias = -0.0004;
+    const fill = new THREE.DirectionalLight(0xbcd2ff, 0.32);
+    fill.position.set(7, 4, -6);
+    const rim = new THREE.DirectionalLight(0xffffff, 0.5);
+    rim.position.set(0, 10, -3);
+    this.scene.add(amb, key, fill, rim);
+    this._keyLight = key;
+    this.scene.environment = makeStudioEnv();
 
     this.keys = [];
     this.designs = {};
@@ -243,8 +291,8 @@ class View {
     this._raycaster = new THREE.Raycaster();
     this.selected = -1;
 
-    /* 共享几何/材质（轴体上座 + 十字轴心） */
-    this._stemMat = new THREE.MeshBasicMaterial({ color: STEM });
+    /* 共享几何/材质（轴体上座 + 十字轴心）：深色尼龙质感 */
+    this._stemMat = new THREE.MeshStandardMaterial({ color: STEM, roughness: 0.5, metalness: 0.15 });
     this._housingGeo = new THREE.BoxGeometry(0.52, 0.3, 0.52);
     this._stemGeoA = new THREE.BoxGeometry(0.13, 0.09, 0.42);
     this._stemGeoB = new THREE.BoxGeometry(0.42, 0.09, 0.13);
@@ -272,7 +320,7 @@ class View {
     this._hasFRow = bounds.H >= 5.9;
     this.W = bounds.W; this.H = bounds.H;
 
-    /* 底板（六面烘焙明暗） */
+    /* 底板：铝质定位板（接收键帽阴影） */
     if (this._plate) {
       this._group.remove(this._plate);
       this._plate.geometry.dispose();
@@ -280,19 +328,11 @@ class View {
     }
     const pm = 0.35;
     const pg = new THREE.BoxGeometry(bounds.W + 2 * pm, 0.42, bounds.H + 2 * pm);
-    const pc = new THREE.Color(plateColor);
-    const sideC = new THREE.Color(Render.shade(plateColor, -34));
-    const sideC2 = new THREE.Color(Render.shade(plateColor, -24));
-    const botC = new THREE.Color(Render.shade(plateColor, -58));
-    const pMats = [
-      new THREE.MeshBasicMaterial({ color: sideC }),
-      new THREE.MeshBasicMaterial({ color: sideC }),
-      new THREE.MeshBasicMaterial({ color: pc }),
-      new THREE.MeshBasicMaterial({ color: botC }),
-      new THREE.MeshBasicMaterial({ color: sideC2 }),
-      new THREE.MeshBasicMaterial({ color: sideC2 })
-    ];
-    this._plate = new THREE.Mesh(pg, pMats);
+    this._plate = new THREE.Mesh(pg, new THREE.MeshStandardMaterial({
+      color: plateColor, roughness: 0.28, metalness: 0.6,
+      envMap: makeStudioEnv(), envMapIntensity: 0.85
+    }));
+    this._plate.receiveShadow = true;
     this._plate.position.set(bounds.W / 2, -0.21, bounds.H / 2);
     this._group.add(this._plate);
 
@@ -302,8 +342,12 @@ class View {
   _buildCap(k, d, index, px, py, single, rowParams) {
     const rowP = rowParams || keycapProfileFor(k, this._hasFRow, this.profile);
     const bg0 = (d && d.bg) || "#e9ecf5";
-    const sideMats = SIDE_SHADE.map((s, j) => new THREE.MeshBasicMaterial({
-      color: Render.shade(bg0, s)
+    /* 键帽材质：ABS 塑料（清漆层 + 低粗糙度），颜色由贴图/灯光驱动 */
+    const env = makeStudioEnv();
+    const sideMats = [0, 1, 2, 3].map(() => new THREE.MeshPhysicalMaterial({
+      color: 0xffffff, roughness: 0.34, metalness: 0.0,
+      clearcoat: 0.5, clearcoatRoughness: 0.28,
+      envMap: env, envMapIntensity: 0.75
     }));
     /* 纹理画布按最终尺寸一次性分配，之后绝不 resize——
      * 带纹理的画布反复 resize 会触发 WebGL 上传越界（贴图残留/错乱的元凶） */
@@ -313,8 +357,12 @@ class View {
     if (d) drawTopCanvas(texCanvas, k, d, this.getImg);
     const tex = makeCapTexture(texCanvas);
     tex.anisotropy = 8;
-    const topMat = new THREE.MeshBasicMaterial({ map: tex, transparent: true });
-    const bottomMat = new THREE.MeshBasicMaterial({ color: Render.shade(bg0, -58) });
+    const topMat = new THREE.MeshPhysicalMaterial({
+      map: tex, transparent: true, roughness: 0.32, metalness: 0.0,
+      clearcoat: 0.55, clearcoatRoughness: 0.22,
+      envMap: env, envMapIntensity: 0.85
+    });
+    const bottomMat = new THREE.MeshStandardMaterial({ color: Render.shade(bg0, -58), roughness: 0.6, metalness: 0.05 });
 
     /* 十字展开包裹：每侧面一张裁剪纹理 + 展开图画布（尺寸同样一次分配） */
     const yBpx = Math.round((rowP.h + Math.sin(rowP.tilt || 0) * (k.h / 2 - TI)) * PXS);
@@ -367,14 +415,7 @@ class View {
 
   _applyPlate() {
     if (!this._plate) return;
-    const mats = Array.isArray(this._plate.material) ? this._plate.material : null;
-    if (!mats) { this._plate.material.color.set(this.plateColor); return; }
-    mats[0].color.set(Render.shade(this.plateColor, -34));
-    mats[1].color.set(Render.shade(this.plateColor, -34));
-    mats[2].color.set(this.plateColor);
-    mats[3].color.set(Render.shade(this.plateColor, -58));
-    mats[4].color.set(Render.shade(this.plateColor, -24));
-    mats[5].color.set(Render.shade(this.plateColor, -24));
+    this._plate.material.color.set(this.plateColor);
   }
 
   setSelected(i) {
@@ -387,12 +428,12 @@ class View {
       if (!d) return;
       const sel = c.index === this.selected;
       const wrapped = !!c.sideMats[0].map;
-      SIDE_SHADE.forEach((s, j) => {
+      SIDE_BLEND.forEach((b, j) => {
         if (wrapped) {
-          /* 包裹模式下明暗已在贴图中，材质色仅用于选中高亮 */
+          /* 包裹模式下明暗由灯光驱动，材质色仅用于选中高亮 */
           c.sideMats[j].color.set(sel ? 0xd9480f : 0xffffff);
         } else {
-          const base = new THREE.Color(Render.shade(d.bg || "#e9ecf5", s));
+          const base = new THREE.Color(d.bg || "#e9ecf5");
           if (sel) base.lerp(ACCENT, SIDE_BLEND[j]);
           c.sideMats[j].color.copy(base);
         }
@@ -420,18 +461,14 @@ class View {
     }
     if (!k) return;
 
-    /* 小底板 */
+    /* 小底板：铝质定位板（接收阴影） */
     const pm = 0.55;
     const pg = new THREE.BoxGeometry(k.w + 2 * pm, 0.42, k.h + 2 * pm);
-    const pc = new THREE.Color(this.plateColor);
-    this._singlePlate = new THREE.Mesh(pg, [
-      new THREE.MeshBasicMaterial({ color: Render.shade(this.plateColor, -34) }),
-      new THREE.MeshBasicMaterial({ color: Render.shade(this.plateColor, -34) }),
-      new THREE.MeshBasicMaterial({ color: pc }),
-      new THREE.MeshBasicMaterial({ color: Render.shade(this.plateColor, -58) }),
-      new THREE.MeshBasicMaterial({ color: Render.shade(this.plateColor, -24) }),
-      new THREE.MeshBasicMaterial({ color: Render.shade(this.plateColor, -24) })
-    ]);
+    this._singlePlate = new THREE.Mesh(pg, new THREE.MeshStandardMaterial({
+      color: this.plateColor, roughness: 0.28, metalness: 0.6,
+      envMap: makeStudioEnv(), envMapIntensity: 0.85
+    }));
+    this._singlePlate.receiveShadow = true;
     this._singlePlate.position.set(k.w / 2, -0.21, k.h / 2);
     this.scene.add(this._singlePlate);
 
@@ -492,11 +529,11 @@ class View {
       }
       if (!wrap) {
         const bg = d.bg || "#e9ecf5";
-        c.sideMats.forEach((m, j) => m.color.set(Render.shade(bg, SIDE_SHADE[j])));
+        c.sideMats.forEach(m => m.color.set(bg));
       }
     }
 
-    const hex = this._plate && this._plate.material[2].color.getHexString();
+    const hex = this._plate && this._plate.material.color.getHexString();
     if (hex && hex !== this.plateColor.replace("#", "").toLowerCase()) this._applyPlate();
   }
 
@@ -617,9 +654,7 @@ class View {
         gg.drawImage(net, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
       }
       gg.restore();
-      /* 烘焙侧面明暗（Basic 材质无灯光） */
-      gg.fillStyle = "rgba(0,0,0," + (-SIDE_SHADE[j] / 100) + ")";
-      gg.fillRect(0, 0, rw, rh);
+      /* 明暗由灯光驱动（PBR），不在贴图中烘焙 */
       c.sideTexs[j].needsUpdate = true;
       if (c.sideMats[j].map !== c.sideTexs[j]) {
         c.sideMats[j].map = c.sideTexs[j];
@@ -632,7 +667,7 @@ class View {
   _clearSideWrap(c, d) {
     c.sideMats.forEach((m, j) => {
       if (m.map) { m.map = null; m.needsUpdate = true; }
-      m.color.set(Render.shade((d && d.bg) || "#e9ecf5", SIDE_SHADE[j]));
+      m.color.set((d && d.bg) || "#e9ecf5");
     });
     c.wrapState = false;
   }
