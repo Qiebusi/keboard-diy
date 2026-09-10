@@ -1,0 +1,44 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e5]:
+      - strong [ref=e6]: 键帽工坊
+      - text: KEYCAP STUDIO · 1U = 19.05MM
+    - generic [ref=e7]:
+      - combobox [ref=e9]:
+        - option "60% · 61 键" [selected]
+        - option "75% · 87 键"
+        - option "87 键 TKL"
+        - option "104 键全尺寸"
+      - button "导入 KLE" [ref=e10] [cursor=pointer]
+      - button "3D 预览" [ref=e11] [cursor=pointer]
+      - button "导出整盘" [ref=e13] [cursor=pointer]
+      - button "导出当前键帽" [ref=e14] [cursor=pointer]
+      - button "保存工程" [ref=e16] [cursor=pointer]
+      - button "载入工程" [ref=e17] [cursor=pointer]
+      - button "清空" [ref=e18] [cursor=pointer]
+  - main [ref=e19]:
+    - generic [ref=e20]:
+      - generic [ref=e22] [cursor=pointer]
+      - generic [ref=e23]:
+        - generic [ref=e24]:
+          - generic [ref=e25]: 单键 3D 预览
+          - button "导出" [disabled] [ref=e26]
+        - generic [ref=e28]:
+          - text: 在键盘中点击一颗键帽
+          - generic [ref=e29]: 拖拽旋转 · 滚轮缩放
+      - generic [ref=e30]: 单击选中键帽·双击 / 拖入图片上传·拖拽移动图片·滚轮缩放图片·Ctrl+V 粘贴图片到选中键
+    - complementary [ref=e31]:
+      - generic [ref=e32]: 在左侧点击一个键帽开始设计
+      - generic [ref=e33]:
+        - heading "全局" [level=3] [ref=e34]
+        - generic [ref=e35]:
+          - generic [ref=e36]: 键帽高度档案（3D）
+          - combobox "键帽高度档案（3D）" [ref=e37]:
+            - option "OEM · 常见机械键盘" [selected]
+            - option "Cherry · 原厂低矮"
+            - option "SA · 高球帽"
+            - option "DSA · 等高球帽"
+            - option "XDA · 等高平顶"
+        - generic [ref=e38]:
+          - generic [ref=e39]: 键盘底板颜色
+          - textbox "键盘底板颜色" [ref=e40] [cursor=pointer]: "#23252f"

@@ -295,6 +295,19 @@ input[type="range"]::-webkit-slider-thumb {
 
 #imgControls { display: flex; flex-direction: column; gap: 10px; }
 
+/* 取模预览 */
+#netPreviewWrap { display: flex; flex-direction: column; gap: 5px; }
+#netPreviewWrap > span { font-size: 11px; color: var(--ink-2); }
+#netPreview {
+  width: 100%;
+  display: block;
+  border: 1.5px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  background-image: repeating-conic-gradient(#f0ede6 0% 25%, #fff 0% 50%);
+  background-size: 14px 14px;
+}
+
 .global-card { margin-top: auto; }
 
 /* ---------- 滚动条 ---------- */

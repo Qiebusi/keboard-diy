@@ -20,9 +20,9 @@
 
   <div class="toolbar">
     <label class="field">
-      <span class="mono">布局</span>
       <select id="layoutSelect">
         <option value="60">60% · 61 键</option>
+        <option value="75">75% · 87 键</option>
         <option value="tkl">87 键 TKL</option>
         <option value="full">104 键全尺寸</option>
       </select>
@@ -44,6 +44,7 @@
   <section class="canvas-area">
     <div class="canvas-scroll" id="canvasScroll">
       <canvas id="board"></canvas>
+      <canvas id="board3d" style="display:none"></canvas>
     </div>
 
     <!-- 单键 3D 预览 -->
@@ -105,6 +106,17 @@
 
         <div id="imgControls">
           <label class="field">
+            <span>贴图范围</span>
+            <select id="imgWrap">
+              <option value="top">仅顶面</option>
+              <option value="net">十字展开包裹（顶面+四壁）</option>
+            </select>
+          </label>
+          <div id="netPreviewWrap" hidden>
+            <span class="mono">取模预览 · 十字展开</span>
+            <canvas id="netPreview"></canvas>
+          </div>
+          <label class="field">
             <span>缩放 <b id="imgScaleVal">1.00x</b></span>
             <input type="range" id="imgScale" min="0.2" max="4" step="0.01" value="1">
           </label>
@@ -136,6 +148,16 @@
     <section class="card global-card">
       <h3 class="mono">全局</h3>
       <label class="field">
+        <span>键帽高度档案（3D）</span>
+        <select id="profileSelect">
+          <option value="oem">OEM · 常见机械键盘</option>
+          <option value="cherry">Cherry · 原厂低矮</option>
+          <option value="sa">SA · 高球帽</option>
+          <option value="dsa">DSA · 等高球帽</option>
+          <option value="xda">XDA · 等高平顶</option>
+        </select>
+      </label>
+      <label class="field">
         <span>键盘底板颜色</span>
         <input type="color" id="plateColor" value="#23252f">
       </label>
@@ -147,9 +169,10 @@
 <input type="file" id="kleInput" accept=".json,application/json" hidden>
 <input type="file" id="projInput" accept=".json,application/json" hidden>
 
-<script src="js/layout.js"></script>
-<script src="js/render.js"></script>
-<script src="js/preview3d.js"></script>
-<script src="js/app.js"></script>
+<script src="js/lib/three.min.js?v=16"></script>
+<script src="js/layout.js?v=28"></script>
+<script src="js/render.js?v=16"></script>
+<script src="js/preview3d.js?v=33"></script>
+<script src="js/app.js?v=34"></script>
 </body>
 </html>

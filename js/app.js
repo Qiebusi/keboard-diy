@@ -1,5 +1,5 @@
 /* =========================================================
- * 主逻辑：状态、交互（平面 / 3D 双模式）、面板、导入导出、存档
+ * 主逻辑：状态、交互（平面 Canvas / 3D Three.js 双模式）、面板、导入导出、存档
  * ========================================================= */
 
 (() => {
@@ -14,13 +14,10 @@
     selected: null,
     hover: null,
     plateColor: "#23252f",
+    profile: "oem",        // 键帽高度档案
     mode: "flat",          // flat | 3d
-    orbit: { yaw: 0.5, elev: 0.9, zoom: 1 },
-    designVersion: 0,      // 设计变更计数（用于 3D 顶面纹理缓存失效）
-    dragging: false,
-    _down: null,
-    _cssW: 0,
-    _cssH: 0
+    designCounter: 0,      // 设计变更计数（per-key .v，驱动 3D 纹理刷新）
+    dragging: false
   };
 
   const imgCache = new Map();   // dataURL -> HTMLImageElement
@@ -29,16 +26,22 @@
   /* ---------- DOM ---------- */
   const $ = id => document.getElementById(id);
   const canvas = $("board");
+  const canvas3d = $("board3d");
   const ctx = canvas.getContext("2d");
   const scrollWrap = $("canvasScroll");
-  const hintbar = document.querySelector(".hintbar");
+  const hintbar = $("hintbar");
 
   const HINT_FLAT = "单击选中键帽<i>·</i>双击 / 拖入图片上传<i>·</i>拖拽移动图片<i>·</i>滚轮缩放图片<i>·</i>Ctrl+V 粘贴图片到选中键";
-  const HINT_3D = "拖拽旋转视角<i>·</i>滚轮缩放<i>·</i>点击选中键帽，右侧面板实时生效<i>·</i>导出整盘 PNG 可导出当前 3D 视角";
+  const HINT_3D = "拖拽旋转视角<i>·</i>滚轮缩放<i>·</i>单击选中 / 双击上传图片<i>·</i>右侧面板实时生效";
 
   let U = 56;            // 平面模式：每单位像素（CSS 像素）
   let PAD = 36;
   let dirty = true;
+
+  /* Three.js 视图 */
+  let P3 = window.Preview3D || null;
+  let boardView = null;
+  let singleView = null;
 
   /* ---------- 工具 ---------- */
   function markDirty() { dirty = true; }
@@ -46,7 +49,7 @@
   function getImg(data) {
     if (!imgCache.has(data)) {
       const el = new Image();
-      el.onload = markDirty;
+      el.onload = () => { markDirty(); };
       el.src = data;
       imgCache.set(data, el);
     }
@@ -68,6 +71,8 @@
   const autosave = debounce(saveProjectLocal, 400);
 
   function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+  function touchDesign(d) { d.v = ++state.designCounter; }
 
   /* ---------- 设计数据 ---------- */
   const MOD_LABELS = new Set([
@@ -96,7 +101,11 @@
     state.layoutName = layoutName;
     state.keys = parseKLE(rows);
     state.designs = {};
-    state.keys.forEach((k, i) => { state.designs[i] = defaultDesign(k); });
+    state.keys.forEach((k, i) => {
+      const d = defaultDesign(k);
+      touchDesign(d);
+      state.designs[i] = d;
+    });
 
     /* 尽量按 键名+尺寸 迁移旧设计 */
     if (keepDesigns) {
@@ -104,108 +113,113 @@
         const oi = oldKeys.findIndex(o => o.label === k.label && o.w === k.w && o.h === k.h && oldDesigns[oldKeys.indexOf(o)]);
         if (oi >= 0 && oldDesigns[oi]) {
           const d = oldDesigns[oi];
-          state.designs[i] = { ...state.designs[i], bg: d.bg, legendColor: d.legendColor, legendSize: d.legendSize, legend: d.legend, img: d.img };
+          Object.assign(state.designs[i], {
+            bg: d.bg, legendColor: d.legendColor, legendSize: d.legendSize, legend: d.legend, img: d.img
+          });
+          touchDesign(state.designs[i]);
           delete oldDesigns[oi];
         }
       });
     }
 
-    state.selected = null;
-    state.designVersion++;
+    setSelected(null);
     fitCanvas();
-    syncPanel();
+    sync3DViews();
     markDirty();
   }
 
-  /* ---------- 画布尺寸 ---------- */
+  /* ---------- 3D 视图 ---------- */
+  function initViews() {
+    if (!P3) return;
+    /* 单键预览画布始终可见，可直接创建；
+       board3d 初始 display:none —— WebGL 上下文在隐藏画布上创建会导致
+       合成显示异常（画面陈旧/发黑），因此延迟到首次进入 3D 模式再创建 */
+    singleView = P3.createSingleView($("key3d"), { getImg });
+    if (state.selected != null) {
+      singleView.setTarget(state.keys[state.selected], state.designs[state.selected]);
+    }
+  }
+
+  function ensureBoardView() {
+    if (boardView || !P3) return;
+    canvas3d.style.width = (scrollWrap.clientWidth - 48) + "px";
+    canvas3d.style.height = (scrollWrap.clientHeight - 48) + "px";
+    boardView = P3.createBoardView(canvas3d, {
+      getImg,
+      onPick: i => setSelected(i),
+      onDoubleClick: i => {
+        if (i != null) {
+          setSelected(i);
+          $("imgInput").click();
+        }
+      }
+    });
+    boardView.setScene(state.keys, state.designs, state.plateColor, state.profile);
+    boardView.setSelected(state.selected);
+    boardView.setActive(true);
+  }
+
+  function sync3DViews() {
+    if (!boardView) return;
+    boardView.setScene(state.keys, state.designs, state.plateColor, state.profile);
+    boardView.setSelected(state.selected);
+    boardView.setPlateColor(state.plateColor);
+    if (state.selected != null) {
+      singleView.setTarget(state.keys[state.selected], state.designs[state.selected],
+        keycapProfileFor(state.keys[state.selected], layoutBounds(state.keys).H >= 5.9, state.profile));
+    } else {
+      singleView.setTarget(null);
+    }
+  }
+
+  function setSelected(i) {
+    state.selected = i;
+    syncPanel();
+    if (boardView) boardView.setSelected(i == null ? -1 : i);
+    if (singleView) {
+      singleView.setTarget(i != null ? state.keys[i] : null,
+        i != null ? state.designs[i] : null,
+        i != null ? keycapProfileFor(state.keys[i], layoutBounds(state.keys).H >= 5.9, state.profile) : undefined);
+    }
+    markDirty();
+  }
+
+  /* ---------- 画布尺寸（平面） ---------- */
   function fitCanvas() {
     const dpr = window.devicePixelRatio || 1;
-    let cssW, cssH;
-
-    if (state.mode === "3d") {
-      cssW = Math.max(320, scrollWrap.clientWidth - 48);
-      cssH = Math.max(260, scrollWrap.clientHeight - 48);
-    } else {
-      const { W, H } = layoutBounds(state.keys);
-      const cw = scrollWrap.clientWidth - PAD * 2;
-      U = Math.max(24, Math.min(96, cw / W));
-      cssW = W * U + PAD * 2;
-      cssH = H * U + PAD * 2;
-      PAD = Math.min(36, U * 0.6);
-    }
-
-    state._cssW = cssW;
-    state._cssH = cssH;
+    const { W, H } = layoutBounds(state.keys);
+    const cw = scrollWrap.clientWidth - PAD * 2;
+    U = Math.max(24, Math.min(96, cw / W));
+    const cssW = W * U + PAD * 2;
+    const cssH = H * U + PAD * 2;
     canvas.width = cssW * dpr;
     canvas.height = cssH * dpr;
     canvas.style.width = cssW + "px";
     canvas.style.height = cssH + "px";
+    PAD = Math.min(36, U * 0.6);
     markDirty();
   }
 
-  /* ---------- 3D 取景（透视） ---------- */
-  function compute3DFit(cssW, cssH) {
-    const { W, H } = layoutBounds(state.keys);
-    const dist = Preview3D.distFor(W, H);
-    const pm = 0.35, top = 0.65, bot = -0.4;
-    const P = Preview3D.makeProjector(state.orbit.yaw, state.orbit.elev, 1, 0, 0, dist);
-    const cs = [
-      [-pm, -pm, top], [W + pm, -pm, top], [W + pm, H + pm, top], [-pm, H + pm, top],
-      [-pm, -pm, bot], [W + pm, -pm, bot], [W + pm, H + pm, bot], [-pm, H + pm, bot]
-    ].map(c => P(c[0], c[1], c[2]));
-    const xs = cs.map(p => p.x), ys = cs.map(p => p.y);
-    const minX = Math.min(...xs), maxX = Math.max(...xs);
-    const minY = Math.min(...ys), maxY = Math.max(...ys);
-    const scale = Math.min((cssW - 24) / (maxX - minX), (cssH - 24) / (maxY - minY));
-    return {
-      scale, dist,
-      cx: cssW / 2 - (minX + maxX) / 2 * scale,
-      cy: cssH / 2 - (minY + maxY) / 2 * scale
-    };
-  }
-
-  function curProjector() {
-    const fit = compute3DFit(state._cssW, state._cssH);
-    return Preview3D.makeProjector(
-      state.orbit.yaw, state.orbit.elev,
-      fit.scale * state.orbit.zoom, fit.cx, fit.cy, fit.dist
-    );
-  }
-
-  /* ---------- 绘制循环 ---------- */
+  /* ---------- 绘制循环（平面） ---------- */
   function frame() {
-    if (dirty) {
+    if (dirty && state.mode === "flat") {
       dirty = false;
       const dpr = window.devicePixelRatio || 1;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.clearRect(0, 0, state._cssW, state._cssH);
+      ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
 
-      if (state.mode === "3d") {
-        const fit = compute3DFit(state._cssW, state._cssH);
-        Preview3D.render(ctx, state.keys, state.designs, {
-          yaw: state.orbit.yaw,
-          elev: state.orbit.elev,
-          scale: fit.scale * state.orbit.zoom,
-          cx: fit.cx,
-          cy: fit.cy,
-          dist: fit.dist,
-          plateColor: state.plateColor,
-          selectedIndex: state.selected,
-          getImg,
-          version: state.designVersion
-        });
-      } else {
-        ctx.save();
-        ctx.translate(PAD, PAD);
-        Render.drawBoard(ctx, state.keys, state.designs, {
-          U,
-          plateColor: state.plateColor,
-          selectedIndex: state.selected,
-          hoverIndex: state.hover,
-          getImg
-        });
-        ctx.restore();
-      }
+      ctx.save();
+      ctx.translate(PAD, PAD);
+      Render.drawBoard(ctx, state.keys, state.designs, {
+        U,
+        plateColor: state.plateColor,
+        selectedIndex: state.selected,
+        hoverIndex: state.hover,
+        getImg
+      });
+      ctx.restore();
+    } else if (state.mode === "3d") {
+      dirty = false;
     }
     requestAnimationFrame(frame);
   }
@@ -221,47 +235,24 @@
     return null;
   }
 
-  function pickAt(px, py) {
-    return Preview3D.pick(state.keys, px, py, curProjector());
-  }
-
   function canvasPos(e) {
     const r = canvas.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   }
 
-  /* ---------- 鼠标交互 ---------- */
+  /* ---------- 平面画布交互 ---------- */
   canvas.addEventListener("mousedown", e => {
     const p = canvasPos(e);
-    if (state.mode === "3d") {
-      state._down = { x: e.clientX, y: e.clientY, moved: false };
-      return;
-    }
-    const i = keyAt(p.x, p.y);
+    const i = keyAt(p.x - PAD, p.y - PAD);
     if (i == null) return;
-    state.selected = i;
+    setSelected(i);
     state.dragging = true;
     state.dragMoved = false;
     state._last = { x: p.x - PAD, y: p.y - PAD };
-    syncPanel();
     markDirty();
   });
 
   window.addEventListener("mousemove", e => {
-    if (state.mode === "3d") {
-      if (state._down) {
-        const dx = e.clientX - state._down.x;
-        const dy = e.clientY - state._down.y;
-        if (Math.abs(dx) + Math.abs(dy) > 3) state._down.moved = true;
-        state.orbit.yaw += dx * 0.006;
-        state.orbit.elev = clamp(state.orbit.elev + dy * 0.006, 0.12, 1.45);
-        state._down.x = e.clientX;
-        state._down.y = e.clientY;
-        markDirty();
-      }
-      return;
-    }
-
     if (state.dragging && state.selected != null) {
       const p = canvasPos(e);
       const px = p.x - PAD, py = p.y - PAD;
@@ -274,6 +265,7 @@
         d.img.ox = clamp((d.img.ox || 0) + dx / g.tw, -1.5, 1.5);
         d.img.oy = clamp((d.img.oy || 0) + dy / g.th, -1.5, 1.5);
         state.dragMoved = true;
+        touchDesign(d);
         syncImageSliders(d.img);
         markDirty();
         autosave();
@@ -281,7 +273,6 @@
       return;
     }
 
-    /* hover */
     if (e.target === canvas) {
       const p = canvasPos(e);
       const i = keyAt(p.x - PAD, p.y - PAD);
@@ -291,35 +282,18 @@
     }
   });
 
-  window.addEventListener("mouseup", e => {
-    if (state.mode === "3d") {
-      if (state._down && !state._down.moved) {
-        const p = canvasPos(e);
-        const i = pickAt(p.x, p.y);
-        state.selected = i;
-        syncPanel();
-        markDirty();
-      }
-      state._down = null;
-    }
-    state.dragging = false;
-  });
+  window.addEventListener("mouseup", () => { state.dragging = false; });
 
   canvas.addEventListener("wheel", e => {
-    if (state.mode === "3d") {
-      e.preventDefault();
-      state.orbit.zoom = clamp(state.orbit.zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1), 0.4, 3);
-      markDirty();
-      return;
-    }
     const p = canvasPos(e);
     const i = keyAt(p.x - PAD, p.y - PAD);
     if (i == null) return;
     const d = state.designs[i];
     if (d && d.img) {
       e.preventDefault();
-      state.selected = i;
+      setSelected(i);
       d.img.scale = clamp((d.img.scale || 1) * (e.deltaY < 0 ? 1.08 : 1 / 1.08), 0.2, 4);
+      touchDesign(d);
       syncPanel();
       markDirty();
       autosave();
@@ -328,22 +302,20 @@
 
   canvas.addEventListener("dblclick", e => {
     const p = canvasPos(e);
-    const i = state.mode === "3d" ? pickAt(p.x, p.y) : keyAt(p.x - PAD, p.y - PAD);
+    const i = keyAt(p.x - PAD, p.y - PAD);
     if (i != null) {
-      state.selected = i;
-      syncPanel();
+      setSelected(i);
       $("imgInput").click();
     }
   });
 
-  /* 拖放图片 */
-  canvas.addEventListener("dragover", e => e.preventDefault());
-  canvas.addEventListener("drop", e => {
+  /* 3D 画布：拖入图片 */
+  canvas3d.addEventListener("dragover", e => e.preventDefault());
+  canvas3d.addEventListener("drop", e => {
     e.preventDefault();
     const file = e.dataTransfer.files && e.dataTransfer.files[0];
     if (!file || !file.type.startsWith("image/")) return;
-    const p = canvasPos(e);
-    const i = state.mode === "3d" ? pickAt(p.x, p.y) : keyAt(p.x - PAD, p.y - PAD);
+    const i = boardView ? boardView.pickAt(e.clientX, e.clientY) : null;
     if (i != null) applyImageFile(file, i);
   });
 
@@ -367,10 +339,8 @@
     reader.onload = () => {
       const d = state.designs[index] || (state.designs[index] = defaultDesign(state.keys[index]));
       d.img = { data: reader.result, scale: 1, rot: 0, ox: 0, oy: 0 };
-      state.designVersion++;
-      state.selected = index;
-      syncPanel();
-      markDirty();
+      touchDesign(d);
+      setSelected(index);
       autosave();
       toast("图片已应用到键帽");
     };
@@ -387,9 +357,74 @@
   $("btnRemoveImg").addEventListener("click", () => {
     const d = curDesign(); if (!d) return;
     d.img = null;
-    state.designVersion++;
-    syncPanel(); markDirty(); autosave();
+    touchDesign(d);
+    syncPanel(); autosave();
   });
+
+  /* ---------- 取模预览（十字展开图） ---------- */
+  function updateNetPreview() {
+    const i = state.selected;
+    const d = i != null ? state.designs[i] : null;
+    const wrapEl = $("netPreviewWrap");
+    const show = !!(d && d.img && d.img.wrap === "net") && !!boardView;
+    wrapEl.style.display = show ? "" : "none";
+    if (!show) return;
+    const net = boardView.getNetCanvas();
+    const L = boardView.getNetLayout();
+    if (!net || !L) return;
+    const cv = $("netPreview");
+    const w = Math.max(120, cv.parentElement.clientWidth - 2);
+    const h = Math.round(net.height * (w / net.width));
+    const dpr = window.devicePixelRatio || 1;
+    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+      cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+    }
+    cv.style.height = h + "px";
+    const g = cv.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    g.drawImage(net, 0, 0, w, h);
+    /* 十字轮廓 + 折线分界（虚线标识） */
+    const s = w / net.width;
+    const netW = L.kh * 2 + L.topW, netH = L.ch * 2 + L.topH;
+    const cross = new Path2D();
+    cross.moveTo(L.topX * s, 0);
+    cross.lineTo((L.topX + L.topW) * s, 0);
+    cross.lineTo((L.topX + L.topW) * s, L.ch * s);
+    cross.lineTo(netW * s, L.ch * s);
+    cross.lineTo(netW * s, (L.ch + L.topH) * s);
+    cross.lineTo((L.topX + L.topW) * s, (L.ch + L.topH) * s);
+    cross.lineTo((L.topX + L.topW) * s, netH * s);
+    cross.lineTo(L.topX * s, netH * s);
+    cross.lineTo(L.topX * s, (L.ch + L.topH) * s);
+    cross.lineTo(0, (L.ch + L.topH) * s);
+    cross.lineTo(0, L.ch * s);
+    cross.lineTo(L.topX * s, L.ch * s);
+    cross.closePath();
+    /* 顶面与四壁的分界（折线） */
+    const folds = new Path2D();
+    folds.moveTo(L.topX * s, L.ch * s);
+    folds.lineTo((L.topX + L.topW) * s, L.ch * s);
+    folds.moveTo(L.topX * s, (L.ch + L.topH) * s);
+    folds.lineTo((L.topX + L.topW) * s, (L.ch + L.topH) * s);
+    folds.moveTo(L.topX * s, L.ch * s);
+    folds.lineTo(L.topX * s, (L.ch + L.topH) * s);
+    folds.moveTo((L.topX + L.topW) * s, L.ch * s);
+    folds.lineTo((L.topX + L.topW) * s, (L.ch + L.topH) * s);
+    /* 白色衬底 + 深色虚线（任意底图上都清晰） */
+    g.save();
+    g.lineWidth = 3;
+    g.strokeStyle = "rgba(255,255,255,0.85)";
+    g.setLineDash([]);
+    g.stroke(cross);
+    g.stroke(folds);
+    g.lineWidth = 1.4;
+    g.strokeStyle = "rgba(28,27,26,0.95)";
+    g.setLineDash([5, 4]);
+    g.stroke(cross);
+    g.stroke(folds);
+    g.restore();
+  }
 
   /* ---------- 面板同步 ---------- */
   function curDesign() {
@@ -406,6 +441,9 @@
     const has = i != null && state.keys[i];
     $("panelEmpty").style.display = has ? "none" : "";
     $("panelBody").style.display = has ? "" : "none";
+    $("btnExportKey3d").disabled = !has;
+    $("key3dEmpty").style.display = has ? "none" : "";
+    $("key3d").style.display = has ? "" : "none";
     if (!has) return;
 
     const k = state.keys[i];
@@ -421,7 +459,11 @@
 
     const hasImg = !!d.img;
     $("imgControls").style.display = hasImg ? "" : "none";
-    if (hasImg) syncImageSliders(d.img);
+    if (hasImg) {
+      syncImageSliders(d.img);
+      $("imgWrap").value = d.img.wrap === "net" ? "net" : "top";
+      updateNetPreview();
+    }
   }
 
   function syncImageSliders(img) {
@@ -440,7 +482,7 @@
     el.addEventListener("input", () => {
       const d = curDesign(); if (!d) return;
       field(d, el);
-      state.designVersion++;
+      touchDesign(d);
       markDirty();
       autosave();
     });
@@ -453,11 +495,13 @@
   $("legendAuto").addEventListener("click", () => {
     const d = curDesign(); if (!d) return;
     d.legendColor = null;
+    touchDesign(d);
     $("legendColor").value = Render.luminance(d.bg) > 0.55 ? "#3a3d46" : "#e8eaf2";
-    markDirty(); autosave();
+    autosave();
     toast("图例颜色已恢复自动配色");
   });
 
+  bindDesign((d, el) => { if (d.img) { d.img.wrap = el.value; } }, $("imgWrap"));
   bindDesign((d, el) => { if (d.img) { d.img.scale = +el.value; $("imgScaleVal").textContent = (+el.value).toFixed(2) + "x"; } }, $("imgScale"));
   bindDesign((d, el) => { if (d.img) { d.img.rot = +el.value; $("imgRotVal").textContent = Math.round(+el.value) + "°"; } }, $("imgRot"));
   bindDesign((d, el) => { if (d.img) { d.img.ox = +el.value; $("imgXVal").textContent = (+el.value).toFixed(2); } }, $("imgX"));
@@ -465,16 +509,38 @@
 
   $("plateColor").addEventListener("input", e => {
     state.plateColor = e.target.value;
+    if (boardView) boardView.setPlateColor(state.plateColor);
     markDirty(); autosave();
+  });
+
+  $("profileSelect").addEventListener("change", e => {
+    state.profile = e.target.value;
+    sync3DViews();
+    autosave();
+    toast("已切换键帽高度档案：" + e.target.selectedOptions[0].textContent);
   });
 
   /* ---------- 模式切换 ---------- */
   $("btn3d").addEventListener("click", () => {
+    if (!P3) {
+      toast("Three.js 未加载成功，无法使用 3D 预览");
+      return;
+    }
     state.mode = state.mode === "3d" ? "flat" : "3d";
     $("btn3d").classList.toggle("active", state.mode === "3d");
     $("btn3d").textContent = state.mode === "3d" ? "返回平面" : "3D 预览";
     hintbar.innerHTML = state.mode === "3d" ? HINT_3D : HINT_FLAT;
-    fitCanvas();
+    if (state.mode === "3d") {
+      canvas3d.style.width = (scrollWrap.clientWidth - 48) + "px";
+      canvas3d.style.height = (scrollWrap.clientHeight - 48) + "px";
+      ensureBoardView();
+    } else if (boardView) {
+      boardView.setActive(false);
+    }
+    canvas3d.style.display = state.mode === "3d" ? "" : "none";
+    canvas.style.display = state.mode === "3d" ? "none" : "";
+    if (boardView) boardView.setSelected(state.selected);
+    markDirty();
   });
 
   /* ---------- 快捷操作 ---------- */
@@ -489,23 +555,29 @@
         legendSize: snapshot.legendSize,
         img: snapshot.img ? { ...snapshot.img } : null
       };
+      touchDesign(state.designs[i]);
     });
-    state.designVersion++;
-    markDirty(); autosave();
+    autosave();
     toast("已应用到全部键帽");
   });
 
   $("btnResetKey").addEventListener("click", () => {
     if (state.selected == null) return;
     state.designs[state.selected] = defaultDesign(state.keys[state.selected]);
-    state.designVersion++;
-    syncPanel(); markDirty(); autosave();
+    touchDesign(state.designs[state.selected]);
+    if (singleView) singleView.setTarget(state.keys[state.selected], state.designs[state.selected]);
+    syncPanel(); autosave();
   });
 
   $("btnClear").addEventListener("click", () => {
-    state.keys.forEach((k, i) => { state.designs[i] = defaultDesign(k); });
-    state.designVersion++;
-    markDirty(); autosave();
+    state.keys.forEach((k, i) => {
+      state.designs[i] = defaultDesign(k);
+      touchDesign(state.designs[i]);
+    });
+    if (singleView && state.selected != null) {
+      singleView.setTarget(state.keys[state.selected], state.designs[state.selected]);
+    }
+    autosave();
     toast("已清空全部设计");
   });
 
@@ -544,16 +616,17 @@
   });
 
   /* ---------- 导出 ---------- */
-  function downloadCanvas(cv, name) {
+  function downloadURL(url, name) {
     const a = document.createElement("a");
-    a.href = cv.toDataURL("image/png");
+    a.href = url;
     a.download = name;
     a.click();
   }
 
   $("btnExportBoard").addEventListener("click", () => {
-    if (state.mode === "3d") {
-      exportBoard3D();
+    if (state.mode === "3d" && boardView) {
+      downloadURL(boardView.snapshot(2), `keycap-board-3d-${state.keys.length}keys.png`);
+      toast("3D 视角整盘 PNG 已导出");
       return;
     }
     const { W, H } = layoutBounds(state.keys);
@@ -566,41 +639,9 @@
     Render.drawBoard(c, state.keys, state.designs, {
       U: eu, plateColor: state.plateColor, getImg, exportMode: true
     });
-    downloadCanvas(cv, `keycap-board-${state.keys.length}keys.png`);
+    downloadURL(cv.toDataURL("image/png"), `keycap-board-${state.keys.length}keys.png`);
     toast("整盘 PNG 已导出");
   });
-
-  function exportBoard3D() {
-    const { W, H } = layoutBounds(state.keys);
-    const S = 260, m = 80, pm = 0.35, top = 0.65, bot = -0.4;
-    const dist = Preview3D.distFor(W, H);
-    const P0 = Preview3D.makeProjector(state.orbit.yaw, state.orbit.elev, S, 0, 0, dist);
-    const cs = [
-      [-pm, -pm, top], [W + pm, -pm, top], [W + pm, H + pm, top], [-pm, H + pm, top],
-      [-pm, -pm, bot], [W + pm, -pm, bot], [W + pm, H + pm, bot], [-pm, H + pm, bot]
-    ].map(c => P0(c[0], c[1], c[2]));
-    const xs = cs.map(p => p.x), ys = cs.map(p => p.y);
-    const minX = Math.min(...xs), maxX = Math.max(...xs);
-    const minY = Math.min(...ys), maxY = Math.max(...ys);
-
-    const cv = document.createElement("canvas");
-    cv.width = Math.ceil(maxX - minX) + m * 2;
-    cv.height = Math.ceil(maxY - minY) + m * 2;
-    const c = cv.getContext("2d");
-    Preview3D.render(c, state.keys, state.designs, {
-      yaw: state.orbit.yaw,
-      elev: state.orbit.elev,
-      scale: S,
-      cx: m - minX,
-      cy: m - minY,
-      dist,
-      plateColor: state.plateColor,
-      getImg,
-      version: state.designVersion
-    });
-    downloadCanvas(cv, `keycap-board-3d-${state.keys.length}keys.png`);
-    toast("3D 视角整盘 PNG 已导出");
-  }
 
   $("btnExportKey").addEventListener("click", () => {
     const i = state.selected;
@@ -614,8 +655,16 @@
     c.translate(pad, pad);
     Render.drawKey(c, k, state.designs[i], { U: eu, getImg, exportMode: true });
     const name = (k.label || "space").replace(/[\\/:*?"<>|]/g, "_");
-    downloadCanvas(cv, `keycap-${name}-${k.w}u.png`);
+    downloadURL(cv.toDataURL("image/png"), `keycap-${name}-${k.w}u.png`);
     toast("键帽 PNG 已导出");
+  });
+
+  $("btnExportKey3d").addEventListener("click", () => {
+    if (state.selected == null || !singleView) { toast("请先选中一个键帽"); return; }
+    const k = state.keys[state.selected];
+    const name = (k.label || "space").replace(/[\\/:*?"<>|]/g, "_");
+    downloadURL(singleView.snapshot(2), `keycap-3d-${name}.png`);
+    toast("单键 3D PNG 已导出");
   });
 
   /* ---------- 工程保存 / 载入 ---------- */
@@ -632,6 +681,7 @@
       layoutName: state.layoutName,
       customRows: state.customRows,
       plateColor: state.plateColor,
+      profile: state.profile,
       designs
     };
   }
@@ -646,14 +696,18 @@
     else buildLayout(getLayoutRows(obj.layoutName || "60"), obj.layoutName || "60", false);
     state.plateColor = obj.plateColor || "#23252f";
     $("plateColor").value = state.plateColor;
+    state.profile = KEYCAP_PROFILES[obj.profile] ? obj.profile : "oem";
+    $("profileSelect").value = state.profile;
     for (const [i, d] of Object.entries(obj.designs)) {
       const idx = +i;
       if (idx < state.keys.length) {
         const base = defaultDesign(state.keys[idx]);
-        state.designs[idx] = { ...base, ...d };
+        const merged = { ...base, ...d };
+        touchDesign(merged);
+        state.designs[idx] = merged;
       }
     }
-    state.designVersion++;
+    sync3DViews();
     markDirty();
     return true;
   }
@@ -683,126 +737,15 @@
     e.target.value = "";
   });
 
-  /* ---------- 单键 3D 预览卡 ---------- */
-  const k3 = { yaw: 0.7, elev: 0.72, zoom: 1, dragging: false, last: null };
-  const k3Canvas = $("key3d");
-  const k3Ctx = k3Canvas.getContext("2d");
-  let k3Timer = 0;   // 交互后暂停自动旋转
-
-  function drawKey3d() {
-    const i = state.selected;
-    const show = i != null;
-    $("key3dEmpty").style.display = show ? "none" : "";
-    k3Canvas.style.display = show ? "" : "none";
-    $("btnExportKey3d").disabled = !show;
-    if (!show) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const cw = k3Canvas.clientWidth, ch = k3Canvas.clientHeight;
-    if (cw < 10 || ch < 10) return;
-    if (k3Canvas.width !== Math.round(cw * dpr) || k3Canvas.height !== Math.round(ch * dpr)) {
-      k3Canvas.width = Math.round(cw * dpr);
-      k3Canvas.height = Math.round(ch * dpr);
-    }
-    const g = k3Ctx;
-    g.setTransform(dpr, 0, 0, dpr, 0, 0);
-    g.clearRect(0, 0, cw, ch);
-
-    const k = state.keys[i], d = state.designs[i];
-    const dist = 5.5;
-
-    /* 取景：投影包围盒自适应 */
-    const ext = 1.0;
-    const P0 = Preview3D.makeProjector(k3.yaw, k3.elev, 1, 0, 0, dist);
-    const cs = [
-      [k.x - ext, k.y - ext, 0.65], [k.x + k.w + ext, k.y - ext, 0.65],
-      [k.x + k.w + ext, k.y + k.h + ext, 0.65], [k.x - ext, k.y + k.h + ext, 0.65],
-      [k.x - ext, k.y - ext, -0.6], [k.x + k.w + ext, k.y - ext, -0.6],
-      [k.x + k.w + ext, k.y + k.h + ext, -0.6], [k.x - ext, k.y + k.h + ext, -0.6]
-    ].map(c => P0(c[0], c[1], c[2]));
-    const xs = cs.map(p => p.x), ys = cs.map(p => p.y);
-    const bw = Math.max(...xs) - Math.min(...xs);
-    const bh = Math.max(...ys) - Math.min(...ys);
-    const focal = Math.min(cw / bw, ch / bh) * 0.88 * k3.zoom;
-
-    Preview3D.renderSingle(g, k, d, {
-      yaw: k3.yaw,
-      elev: k3.elev,
-      focal,
-      cx: cw / 2,
-      cy: ch / 2,
-      dist,
-      plateColor: state.plateColor,
-      getImg,
-      version: state.designVersion,
-      cacheKey: "s" + i
-    });
-  }
-
-  function loop3d() {
-    const i = state.selected;
-    if (i != null) {
-      if (!k3.dragging && Date.now() > k3Timer) k3.yaw += 0.006;   // 空闲自动旋转
-      drawKey3d();
-    }
-    requestAnimationFrame(loop3d);
-  }
-
-  k3Canvas.addEventListener("mousedown", e => {
-    k3.dragging = true;
-    k3.last = { x: e.clientX, y: e.clientY };
-  });
-  window.addEventListener("mousemove", e => {
-    if (!k3.dragging) return;
-    k3.yaw += (e.clientX - k3.last.x) * 0.008;
-    k3.elev = clamp(k3.elev + (e.clientY - k3.last.y) * 0.008, 0.1, 1.45);
-    k3.last = { x: e.clientX, y: e.clientY };
-    k3Timer = Date.now() + 2400;
-  });
-  window.addEventListener("mouseup", () => { k3.dragging = false; });
-  k3Canvas.addEventListener("wheel", e => {
-    e.preventDefault();
-    k3.zoom = clamp(k3.zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1), 0.5, 2.2);
-    k3Timer = Date.now() + 2400;
-  }, { passive: false });
-
-  $("btnExportKey3d").addEventListener("click", () => {
-    const i = state.selected;
-    if (i == null) { toast("请先选中一个键帽"); return; }
-    const k = state.keys[i];
-    const S = 720, m = 70, ext = 1.0, dist = 5.5;
-    const P0 = Preview3D.makeProjector(k3.yaw, k3.elev, S, 0, 0, dist);
-    const cs = [
-      [k.x - ext, k.y - ext, 0.65], [k.x + k.w + ext, k.y - ext, 0.65],
-      [k.x + k.w + ext, k.y + k.h + ext, 0.65], [k.x - ext, k.y + k.h + ext, 0.65],
-      [k.x - ext, k.y - ext, -0.6], [k.x + k.w + ext, k.y - ext, -0.6],
-      [k.x + k.w + ext, k.y + k.h + ext, -0.6], [k.x - ext, k.y + k.h + ext, -0.6]
-    ].map(c => P0(c[0], c[1], c[2]));
-    const xs = cs.map(p => p.x), ys = cs.map(p => p.y);
-    const minX = Math.min(...xs), maxX = Math.max(...xs);
-    const minY = Math.min(...ys), maxY = Math.max(...ys);
-    const cv = document.createElement("canvas");
-    cv.width = Math.ceil(maxX - minX) + m * 2;
-    cv.height = Math.ceil(maxY - minY) + m * 2;
-    Preview3D.renderSingle(cv.getContext("2d"), k, state.designs[i], {
-      yaw: k3.yaw,
-      elev: k3.elev,
-      focal: S,
-      cx: m - minX,
-      cy: m - minY,
-      dist,
-      plateColor: state.plateColor,
-      getImg,
-      version: state.designVersion,
-      cacheKey: "s" + i
-    });
-    const name = (k.label || "space").replace(/[\\/:*?"<>|]/g, "_");
-    downloadCanvas(cv, `keycap-3d-${name}.png`);
-    toast("单键 3D PNG 已导出");
-  });
-
   /* ---------- 初始化 ---------- */
-  window.addEventListener("resize", debounce(fitCanvas, 150));
+  window.addEventListener("resize", debounce(() => {
+    if (state.mode === "flat") {
+      fitCanvas();
+    } else if (boardView) {
+      canvas3d.style.width = (scrollWrap.clientWidth - 48) + "px";
+      canvas3d.style.height = (scrollWrap.clientHeight - 48) + "px";
+    }
+  }, 150));
 
   buildLayout(getLayoutRows("60"), "60", false);
   try {
@@ -811,6 +754,10 @@
   } catch { /* 忽略 */ }
   hintbar.innerHTML = HINT_FLAT;
   fitCanvas();
+
+  if (P3) initViews();
+  else document.addEventListener("p3d-ready", () => { P3 = window.Preview3D; initViews(); }, { once: true });
+
+  setInterval(updateNetPreview, 250);
   requestAnimationFrame(frame);
-  requestAnimationFrame(loop3d);
 })();
