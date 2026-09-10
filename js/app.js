@@ -338,7 +338,8 @@
     const reader = new FileReader();
     reader.onload = () => {
       const d = state.designs[index] || (state.designs[index] = defaultDesign(state.keys[index]));
-      d.img = { data: reader.result, scale: 1, rot: 0, ox: 0, oy: 0 };
+      /* 保留当前贴图模式（wrap），仅替换图片数据与变换参数 */
+      d.img = { data: reader.result, wrap: d.img ? d.img.wrap : undefined, scale: 1, rot: 0, ox: 0, oy: 0 };
       touchDesign(d);
       setSelected(index);
       autosave();
@@ -361,68 +362,80 @@
     syncPanel(); autosave();
   });
 
-  /* ---------- 取模预览（十字展开图） ---------- */
+  /* ---------- 取模预览（真实十字展开：梯形侧壁 + 分排倾角） ---------- */
   function updateNetPreview() {
     const i = state.selected;
     const d = i != null ? state.designs[i] : null;
     const wrapEl = $("netPreviewWrap");
-    const show = !!(d && d.img && d.img.wrap === "net") && !!boardView;
+    const show = !!(d && d.img && d.img.wrap === "net") && i != null && !!boardView;
     wrapEl.style.display = show ? "" : "none";
     if (!show) return;
-    const net = boardView.getNetCanvas();
-    const L = boardView.getNetLayout();
-    if (!net || !L) return;
+
+    /* 真实展开尺寸（u）：含顶面内缩、锥度、分排倾角 */
+    const k = state.keys[i];
+    const TI = Preview3D.TI;
+    const prof = keycapProfileFor(k, layoutBounds(state.keys).H >= 5.9, state.profile);
+    const w = k.w, hh = k.h;
+    const tw = w - 2 * TI, th = hh - 2 * TI;
+    const ch = prof.h, tilt = prof.tilt || 0;
+    const yB = ch + Math.sin(tilt) * (hh / 2 - TI);
+    const yF = ch - Math.sin(tilt) * (hh / 2 - TI);
+
     const cv = $("netPreview");
-    const w = Math.max(120, cv.parentElement.clientWidth - 2);
-    const h = Math.round(net.height * (w / net.width));
+    const wpx = Math.max(120, cv.parentElement.clientWidth - 2);
+    const s = wpx / (2 * ch + tw);
+    const hpx = (yB + th + yF) * s;
     const dpr = window.devicePixelRatio || 1;
-    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
-      cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+    if (cv.width !== Math.round(wpx * dpr) || cv.height !== Math.round(hpx * dpr)) {
+      cv.width = Math.round(wpx * dpr); cv.height = Math.round(hpx * dpr);
     }
-    cv.style.height = h + "px";
+    cv.style.height = hpx + "px";
     const g = cv.getContext("2d");
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
-    g.clearRect(0, 0, w, h);
-    g.drawImage(net, 0, 0, w, h);
-    /* 十字轮廓 + 折线分界（虚线标识） */
-    const s = w / net.width;
-    const netW = L.kh * 2 + L.topW, netH = L.ch * 2 + L.topH;
-    const cross = new Path2D();
-    cross.moveTo(L.topX * s, 0);
-    cross.lineTo((L.topX + L.topW) * s, 0);
-    cross.lineTo((L.topX + L.topW) * s, L.ch * s);
-    cross.lineTo(netW * s, L.ch * s);
-    cross.lineTo(netW * s, (L.ch + L.topH) * s);
-    cross.lineTo((L.topX + L.topW) * s, (L.ch + L.topH) * s);
-    cross.lineTo((L.topX + L.topW) * s, netH * s);
-    cross.lineTo(L.topX * s, netH * s);
-    cross.lineTo(L.topX * s, (L.ch + L.topH) * s);
-    cross.lineTo(0, (L.ch + L.topH) * s);
-    cross.lineTo(0, L.ch * s);
-    cross.lineTo(L.topX * s, L.ch * s);
-    cross.closePath();
-    /* 顶面与四壁的分界（折线） */
-    const folds = new Path2D();
-    folds.moveTo(L.topX * s, L.ch * s);
-    folds.lineTo((L.topX + L.topW) * s, L.ch * s);
-    folds.moveTo(L.topX * s, (L.ch + L.topH) * s);
-    folds.lineTo((L.topX + L.topW) * s, (L.ch + L.topH) * s);
-    folds.moveTo(L.topX * s, L.ch * s);
-    folds.lineTo(L.topX * s, (L.ch + L.topH) * s);
-    folds.moveTo((L.topX + L.topW) * s, L.ch * s);
-    folds.lineTo((L.topX + L.topW) * s, (L.ch + L.topH) * s);
-    /* 白色衬底 + 深色虚线（任意底图上都清晰） */
+    g.clearRect(0, 0, wpx, hpx);
+
+    /* 真实十字展开（纸样模板）：顶面 + 四壁梯形臂，锥度收分与模型一致，折叠线处图案连续 */
+    const xT0 = ch * s, xT1 = (ch + tw) * s, yT0 = yB * s, yT1 = (yB + th) * s;
+    const o = TI * s;
+    const polys = [
+      [xT0, yT0, xT1, yT0, xT1, yT1, xT0, yT1],             // 顶面 tw × th
+      [xT0 - o, 0, xT1 + o, 0, xT1, yT0, xT0, yT0],         // 北壁梯形：折缝 tw，外缘 w，高 yB
+      [xT0, yT1, xT1, yT1, xT1 + o, hpx, xT0 - o, hpx],     // 南壁梯形：高 yF
+      [xT0, yT0, 0, yT0 - o, 0, yT1 + o, xT0, yT1],         // 西壁梯形：折缝 th，外缘 hh
+      [xT1, yT0, wpx, yT0 - o, wpx, yT1 + o, xT1, yT1]      // 东壁梯形
+    ];
+    const tracePoly = f => {
+      for (let i = 0; i < f.length; i += 2) i ? g.lineTo(f[i], f[i + 1]) : g.moveTo(f[i], f[i + 1]);
+      g.closePath();
+    };
+
+    /* 十字轮廓内：底色 + 图片整体铺放（cover 铺满整个展开图，缩放/偏移/旋转可调），绝不拉伸 */
+    g.save();
+    g.beginPath();
+    polys.forEach(tracePoly);
+    g.fillStyle = d.bg || "#e9ecf5";
+    g.fill();
+    g.clip();
+    const img = d.img ? boardView ? boardView.getImg(d.img.data) : null : null;
+    if (img && img.complete && img.naturalWidth > 0) {
+      const s2 = Math.max(wpx / img.naturalWidth, hpx / img.naturalHeight) * (d.img.scale || 1);
+      g.translate(wpx / 2 + (d.img.ox || 0) * wpx, hpx / 2 + (d.img.oy || 0) * hpx);
+      g.rotate((d.img.rot || 0) * Math.PI / 180);
+      g.drawImage(img, -img.naturalWidth * s2 / 2, -img.naturalHeight * s2 / 2,
+                  img.naturalWidth * s2, img.naturalHeight * s2);
+    }
+    g.restore();
+
+    /* 折叠线与外轮廓：白色衬底 + 深色虚线 */
     g.save();
     g.lineWidth = 3;
     g.strokeStyle = "rgba(255,255,255,0.85)";
     g.setLineDash([]);
-    g.stroke(cross);
-    g.stroke(folds);
+    polys.forEach(f => { g.beginPath(); tracePoly(f); g.stroke(); });
     g.lineWidth = 1.4;
     g.strokeStyle = "rgba(28,27,26,0.95)";
     g.setLineDash([5, 4]);
-    g.stroke(cross);
-    g.stroke(folds);
+    polys.forEach(f => { g.beginPath(); tracePoly(f); g.stroke(); });
     g.restore();
   }
 

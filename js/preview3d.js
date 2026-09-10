@@ -143,24 +143,34 @@ function capGeometry(k, params) {
 
   function quad(n, a, b, c, d, uv) { pushQuad(pos, uvs, n, a, b, c, d, uv); }
 
-  /* 北（后缘，-z） */
-  quad([0, 0, -1], [0, 0, 0], [w, 0, 0], [w - r1, z1, r1], [r1, z1, r1], SIDE_UV);
-  quad([0, 0, -1], [r1, z1, r1], [w - r1, z1, r1], [w - TI, yB, TI], [TI, yB, TI], SIDE_UV);
+  /* 侧面 UV：u 沿壁横向、v 按高度分段（裙边 [0, z1/H]，锥形段 [z1/H, 1]）。
+   * 方向与印刷展开图折叠一致：北/南 u 沿展开图 x（西→东），东 u 沿展开图 y（北→南），西反向闭合 */
+  /* 北（后缘，-z），壁高 yB */
+  quad([0, 0, -1], [0, 0, 0], [w, 0, 0], [w - r1, z1, r1], [r1, z1, r1],
+       [[0, 0], [1, 0], [1 - r1 / w, z1 / yB], [r1 / w, z1 / yB]]);
+  quad([0, 0, -1], [r1, z1, r1], [w - r1, z1, r1], [w - TI, yB, TI], [TI, yB, TI],
+       [[r1 / w, z1 / yB], [1 - r1 / w, z1 / yB], [1 - TI / w, 1], [TI / w, 1]]);
   groups.push([start, (pos.length / 3) - start, 0]); start = pos.length / 3;
 
-  /* 东（+x） */
-  quad([1, 0, 0], [w, 0, 0], [w, 0, hh], [w - r1, z1, hh - r1], [w - r1, z1, r1], SIDE_UV);
-  quad([1, 0, 0], [w - r1, z1, r1], [w - r1, z1, hh - r1], [w - TI, yF, hh - TI], [w - TI, yB, TI], SIDE_UV);
+  /* 东（+x），壁高 ch */
+  quad([1, 0, 0], [w, 0, 0], [w, 0, hh], [w - r1, z1, hh - r1], [w - r1, z1, r1],
+       [[0, 0], [1, 0], [1 - r1 / hh, z1 / ch], [r1 / hh, z1 / ch]]);
+  quad([1, 0, 0], [w - r1, z1, r1], [w - r1, z1, hh - r1], [w - TI, yF, hh - TI], [w - TI, yB, TI],
+       [[r1 / hh, z1 / ch], [1 - r1 / hh, z1 / ch], [1 - TI / hh, 1], [TI / hh, 1]]);
   groups.push([start, (pos.length / 3) - start, 1]); start = pos.length / 3;
 
-  /* 南（前缘，+z） */
-  quad([0, 0, 1], [w, 0, hh], [0, 0, hh], [r1, z1, hh - r1], [w - r1, z1, hh - r1], SIDE_UV);
-  quad([0, 0, 1], [w - r1, z1, hh - r1], [r1, z1, hh - r1], [TI, yF, hh - TI], [w - TI, yF, hh - TI], SIDE_UV);
+  /* 南（前缘，+z），壁高 yF */
+  quad([0, 0, 1], [w, 0, hh], [0, 0, hh], [r1, z1, hh - r1], [w - r1, z1, hh - r1],
+       [[1, 0], [0, 0], [r1 / w, z1 / yF], [1 - r1 / w, z1 / yF]]);
+  quad([0, 0, 1], [w - r1, z1, hh - r1], [r1, z1, hh - r1], [TI, yF, hh - TI], [w - TI, yF, hh - TI],
+       [[1 - r1 / w, z1 / yF], [r1 / w, z1 / yF], [TI / w, 1], [1 - TI / w, 1]]);
   groups.push([start, (pos.length / 3) - start, 2]); start = pos.length / 3;
 
-  /* 西（-x） */
-  quad([-1, 0, 0], [0, 0, hh], [0, 0, 0], [r1, z1, r1], [r1, z1, hh - r1], SIDE_UV);
-  quad([-1, 0, 0], [r1, z1, r1], [r1, z1, hh - r1], [TI, yF, hh - TI], [TI, yB, TI], SIDE_UV);
+  /* 西（-x），壁高 ch */
+  quad([-1, 0, 0], [0, 0, hh], [0, 0, 0], [r1, z1, r1], [r1, z1, hh - r1],
+       [[0, 0], [1, 0], [1 - r1 / hh, z1 / ch], [r1 / hh, z1 / ch]]);
+  quad([-1, 0, 0], [r1, z1, r1], [r1, z1, hh - r1], [TI, yF, hh - TI], [TI, yB, TI],
+       [[1 - r1 / hh, z1 / ch], [r1 / hh, z1 / ch], [TI / hh, 1], [1 - TI / hh, 1]]);
   groups.push([start, (pos.length / 3) - start, 3]); start = pos.length / 3;
 
   /* 底面（防止低角度看穿裙边） */
@@ -310,7 +320,7 @@ class View {
     this._group.add(housing, stemA, stemB);
 
     const cap = { mesh, sideMats, bottomMat, topMat, tex, texCanvas, sideTexs, netCanvas,
-                  v: d ? d.v : -1, wrapState: null, index, k, ch: rowP.h,
+                  v: d ? d.v : -1, wrapState: null, index, k, ch: rowP.h, tilt: rowP.tilt || 0,
                   housing, stemA, stemB };
     this.caps.push(cap);
     this.capMeshes.push(mesh);
@@ -441,6 +451,8 @@ class View {
       const imgOk = img && img.complete && img.naturalWidth > 0;
       const imgPending = d.img && !imgOk;
       const wrap = !!(d.img && d.img.wrap === "net") && imgOk;
+      /* 新图加载中：保持当前包裹画面不变，避免中途回退成仅顶面 */
+      if (imgPending && c.wrapState) continue;
       if (d.v !== c.v || imgPending || wrap !== c.wrapState) {
         if (wrap) this._applyWrapNet(c, d, img);
         else {
@@ -460,83 +472,109 @@ class View {
     if (hex && hex !== this.plateColor.replace("#", "").toLowerCase()) this._applyPlate();
   }
 
-  /* ----- 十字展开取模：图片铺满展开图，顶面取中心、四壁取相邻区域 ----- */
+  /* ----- 十字展开取模：按真实展开尺寸取样（与取模预览完全一致）
+   * 展开图布局：北壁 | 西壁 · 顶面(tw×th) · 东壁 | 南壁
+   * 顶面取样 tw×th（真实顶面），四壁按分排高度 yB/yF/ch 取样 ----- */
   _applyWrapNet(c, d, img) {
     const k = c.k, PX = PXS;
-    const ch = c.ch || 0.55;
-    const netW = k.w + 2 * k.h;    /* 西条 | 顶面 | 东条 */
-    const netH = k.h + 2 * ch;     /* 北条 | 顶面 | 南条 */
+    const tw = k.w - 2 * TI, th = k.h - 2 * TI;
+    const tilt = c.tilt || 0;
+    const chH = c.ch || 0.55;
+    const yB = chH + Math.sin(tilt) * (k.h / 2 - TI);
+    const yF = chH - Math.sin(tilt) * (k.h / 2 - TI);
+
+    const netW = chH + tw + chH;  /* 西壁竖条 | 顶面 | 东壁竖条（壁条宽=壁高，高=键深） */
+    const netH = yB + th + yF;    /* 北壁 | 顶面 | 南壁 */
     const NW = Math.max(8, Math.round(netW * PX));
     const NH = Math.max(8, Math.round(netH * PX));
     const net = c.netCanvas;
     if (net.width !== NW || net.height !== NH) { net.width = NW; net.height = NH; }
     const g = net.getContext("2d", { willReadFrequently: true });
     g.clearRect(0, 0, NW, NH);
-    const s = Math.max(NW / img.naturalWidth, NH / img.naturalHeight);
-    g.drawImage(img, (NW - img.naturalWidth * s) / 2, (NH - img.naturalHeight * s) / 2,
+    /* 底色填充：图片未覆盖区域显示键帽底色（不透明） */
+    g.fillStyle = (d && d.bg) || "#e9ecf5";
+    g.fillRect(0, 0, NW, NH);
+
+    /* 各面取样条带（真实展开：北/南横条，东/西竖条，折叠线处图案连续） */
+    const topR = { x: chH * PX, y: yB * PX, w: tw * PX, h: th * PX };
+    const sideR = [
+      { x: (chH - TI) * PX, y: 0, w: k.w * PX, h: yB * PX, m: "n" },                // 北壁
+      { x: (chH + tw) * PX, y: (yB - TI) * PX, w: chH * PX, h: k.h * PX, m: "e" },  // 东壁竖条
+      { x: (chH - TI) * PX, y: (yB + th) * PX, w: k.w * PX, h: yF * PX, m: "s" },   // 南壁
+      { x: 0, y: (yB - TI) * PX, w: chH * PX, h: k.h * PX, m: "w" }                 // 西壁竖条
+    ];
+    c.netLayout = { px: PX, ch: chH * PX, kh: k.h * PX, topX: topR.x, topY: topR.y, topW: topR.w, topH: topR.h };
+
+    /* 原始比例放置：cover 铺满整个展开图（图片印满模板、包裹全部五面）× 缩放/偏移/旋转可调，
+     * 绝不拉伸变形；展开区域外多出的图片部分自然裁掉 */
+    const s = Math.max(NW / img.naturalWidth, NH / img.naturalHeight) * ((d && d.img && d.img.scale) || 1);
+    g.save();
+    g.translate(NW / 2 + ((d && d.img && d.img.ox) || 0) * NW,
+                NH / 2 + ((d && d.img && d.img.oy) || 0) * NH);
+    g.rotate(((d && d.img && d.img.rot) || 0) * Math.PI / 180);
+    g.drawImage(img, -img.naturalWidth * s / 2, -img.naturalHeight * s / 2,
                 img.naturalWidth * s, img.naturalHeight * s);
+    g.restore();
 
-    const topX = k.h * PX, topY = ch * PX, topW = k.w * PX, topH = k.h * PX;
-    c.netLayout = { px: PX, ch: ch * PX, kh: k.h * PX, topX, topY, topW, topH };
-
-    /* 顶面区域 → 顶面纹理 */
-    if (c.texCanvas.width !== topW || c.texCanvas.height !== topH) {
-      c.texCanvas.width = topW; c.texCanvas.height = topH;
+    /* 顶面区域 → 顶面纹理（真实顶面尺寸 tw × th） */
+    if (c.texCanvas.width !== topR.w || c.texCanvas.height !== topR.h) {
+      c.texCanvas.width = topR.w; c.texCanvas.height = topR.h;
     }
     const gt = c.texCanvas.getContext("2d", { willReadFrequently: true });
-    gt.clearRect(0, 0, topW, topH);
-    gt.drawImage(net, topX, topY, topW, topH, 0, 0, topW, topH);
+    gt.clearRect(0, 0, topR.w, topR.h);
+    gt.drawImage(net, topR.x, topR.y, topR.w, topR.h, 0, 0, topR.w, topR.h);
 
     /* 图例印在展开图的顶面区域（随包裹出现在键帽顶面） */
     const legend = d && d.legend != null ? d.legend : k.label;
     if (legend) {
       const bg = d.bg || "#e9ecf5";
       const color = (d && d.legendColor) || (Render.luminance(bg) > 0.55 ? "#3a3d46" : "#e8eaf2");
-      const fs = Math.min(topH * 0.36 * ((d && d.legendSize) || 1), 0.28 * PXU);
+      const fs = Math.min(topR.h * 0.36 * ((d && d.legendSize) || 1), 0.28 * PXU);
       gt.fillStyle = color;
       gt.font = `600 ${Math.max(8, fs)}px Inter, "Segoe UI", "Microsoft YaHei", sans-serif`;
       gt.textAlign = "left";
       gt.textBaseline = "top";
-      const pad = Math.min(topW, topH) * 0.11;
+      const pad = Math.min(topR.w, topR.h) * 0.11;
       gt.fillText(legend, pad, pad * 0.9);
     }
 
     /* 顶面光影 */
     gt.save();
-    roundRect(gt, 0, 0, topW, topH, 0.10 * PXU);
+    roundRect(gt, 0, 0, topR.w, topR.h, 0.10 * PXU);
     gt.clip();
-    const gr = gt.createLinearGradient(0, 0, 0, topH);
+    const gr = gt.createLinearGradient(0, 0, 0, topR.h);
     gr.addColorStop(0, "rgba(255,255,255,0.13)");
     gr.addColorStop(0.55, "rgba(255,255,255,0)");
     gr.addColorStop(1, "rgba(0,0,0,0.07)");
     gt.fillStyle = gr;
-    gt.fillRect(0, 0, topW, topH);
+    gt.fillRect(0, 0, topR.w, topR.h);
     gt.restore();
 
     c.tex.needsUpdate = true;
 
-    /* 四侧条带 → 侧面纹理（北条翻转：与顶面的接缝朝上） */
-    const regions = [
-      { r: { x: topX, y: 0, w: topW, h: ch * PX }, flipY: true },              // 北
-      { r: { x: topX + topW, y: topY, w: k.h * PX, h: topH }, flipY: false },  // 东
-      { r: { x: topX, y: topY + topH, w: topW, h: ch * PX }, flipY: false },   // 南
-      { r: { x: 0, y: topY, w: k.h * PX, h: topH }, flipY: false }             // 西
-    ];
-    regions.forEach((rg, j) => {
+    /* 四壁区域 → 侧面纹理（折叠刚体变换：北壁竖直翻转，东/西壁转置铺平） */
+    sideR.forEach((r, j) => {
       const cv = c.sideTexs[j].image;
-      const rw = Math.max(4, Math.round(rg.r.w));
-      const rh = Math.max(4, Math.round(rg.r.h));
+      const tp = r.m === "e" || r.m === "w";
+      const rw = Math.max(4, Math.round(tp ? r.h : r.w));
+      const rh = Math.max(4, Math.round(tp ? r.w : r.h));
       if (cv.width !== rw || cv.height !== rh) { cv.width = rw; cv.height = rh; }
       const gg = cv.getContext("2d", { willReadFrequently: true });
       gg.clearRect(0, 0, rw, rh);
-      if (rg.flipY) {
-        gg.save();
-        gg.translate(0, rh); gg.scale(1, -1);
-        gg.drawImage(net, rg.r.x, rg.r.y, rg.r.w, rg.r.h, 0, 0, rw, rh);
-        gg.restore();
+      gg.save();
+      if (r.m === "n") {
+        gg.translate(0, rh); gg.scale(1, -1);          // 折痕在下缘 → 接缝翻到纹理上缘
+        gg.drawImage(net, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+      } else if (r.m === "s") {
+        gg.drawImage(net, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+      } else if (r.m === "e") {
+        gg.transform(0, 1, 1, 0, 0, 0);                // 竖条转置：折痕(左缘)→纹理上缘
+        gg.drawImage(net, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
       } else {
-        gg.drawImage(net, rg.r.x, rg.r.y, rg.r.w, rg.r.h, 0, 0, rw, rh);
+        gg.transform(0, -1, -1, 0, rw, rh);            // 西条：折痕(右缘)→纹理上缘
+        gg.drawImage(net, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
       }
+      gg.restore();
       /* 烘焙侧面明暗（Basic 材质无灯光） */
       gg.fillStyle = "rgba(0,0,0," + (-SIDE_SHADE[j] / 100) + ")";
       gg.fillRect(0, 0, rw, rh);
@@ -694,5 +732,5 @@ function createSingleView(canvas, opts = {}) {
   return v;
 }
 
-window.Preview3D = { createBoardView, createSingleView };
+window.Preview3D = { createBoardView, createSingleView, TI };
 })();
