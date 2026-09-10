@@ -15,8 +15,8 @@ if (!window.THREE) {
 }
 
 const TI = 0.125;          // 顶面内缩（1u 顶面 ≈ 0.66u，与实物一致）
-const PXU = 300;           // 顶面纹理分辨率（px / u）
-const PXS = 200;           // 包裹展开图分辨率（px / u）
+const PXU = 200;           // 纹理分辨率（px / u）——全模式统一，避免画布反复 resize
+const PXS = PXU;           // 包裹展开图分辨率（与顶面一致）
 const FOV = 40;
 const FLOAT = 0.34;        // 裙边底部离底板高度（露出轴体上座）
 const STEM = new THREE.Color(0x17181d);   // 轴体颜色
@@ -26,6 +26,18 @@ const SIDE_UV = [[0, 0], [1, 0], [1, 1], [0, 1]];
 /* 侧向明暗烘焙系数（固定光向：左前上方）北 东 南 西 */
 const SIDE_SHADE = [ -18, -38, -26, -30 ];
 const SIDE_BLEND = [0.45, 0.6, 0.5, 0.55];
+
+/* 键帽纹理统一创建：禁 mipmap + 线性过滤（NPOT 画布必需）
+ * 注意：纹理画布不要加 willReadFrequently —— 该选项使画布走软件光栅化，
+ * Chromium 下作为 WebGL 纹理上传时会读到陈旧副本（表现为贴图残留/图中小图） */
+function makeCapTexture(cv) {
+  const t = new THREE.CanvasTexture(cv);
+  t.generateMipmaps = false;
+  t.minFilter = THREE.LinearFilter;
+  t.magFilter = THREE.LinearFilter;
+  t.anisotropy = 4;
+  return t;
+}
 
 /* ---------- 顶面纹理绘制（仅顶面模式，与平面渲染一致） ---------- */
 function roundRect(g, x, y, w, h, r) {
@@ -61,8 +73,9 @@ function drawTopCanvas(cv, k, d, getImg) {
   const TW = Math.max(8, Math.round(tw * PXU));
   const TH = Math.max(8, Math.round(th * PXU));
   if (cv.width !== TW || cv.height !== TH) { cv.width = TW; cv.height = TH; }
-  /* willReadFrequently: 强制 CPU 后备存储，保证纹理上传内容可靠 */
-  const g = cv.getContext("2d", { willReadFrequently: true });
+  /* 注意：纹理画布不要加 willReadFrequently —— 该选项使画布走软件光栅化，
+   * Chromium 下作为 WebGL 纹理上传时会读到陈旧副本（表现为贴图残留/图中小图） */
+  const g = cv.getContext("2d");
   g.clearRect(0, 0, TW, TH);
 
   const bg = (d && d.bg) || "#e9ecf5";
@@ -237,8 +250,12 @@ class View {
     this._stemGeoB = new THREE.BoxGeometry(0.42, 0.09, 0.13);
 
     this._bindPointer();
+    /* 渲染循环必须免疫单帧异常：_frame 抛错时若不继续调度 rAF，
+     * 循环会永久死亡（画面冻结在旧帧 = 模型"卡住"） */
     const loop = () => {
-      if (this.active) this._frame();
+      if (this.active) {
+        try { this._frame(); } catch (e) { console.error("[3D] render:", e && e.message, e); }
+      }
       requestAnimationFrame(loop);
     };
     requestAnimationFrame(loop);
@@ -288,22 +305,33 @@ class View {
     const sideMats = SIDE_SHADE.map((s, j) => new THREE.MeshBasicMaterial({
       color: Render.shade(bg0, s)
     }));
+    /* 纹理画布按最终尺寸一次性分配，之后绝不 resize——
+     * 带纹理的画布反复 resize 会触发 WebGL 上传越界（贴图残留/错乱的元凶） */
     const texCanvas = document.createElement("canvas");
+    texCanvas.width = Math.round((k.w - 2 * TI) * PXS);
+    texCanvas.height = Math.round(rowP.h * PXS);
     if (d) drawTopCanvas(texCanvas, k, d, this.getImg);
-    const tex = new THREE.CanvasTexture(texCanvas);
+    const tex = makeCapTexture(texCanvas);
     tex.anisotropy = 8;
     const topMat = new THREE.MeshBasicMaterial({ map: tex, transparent: true });
     const bottomMat = new THREE.MeshBasicMaterial({ color: Render.shade(bg0, -58) });
 
-    /* 十字展开包裹：每侧面一张裁剪纹理 + 展开图画布 */
-    const sideTexs = [0, 1, 2, 3].map(() => {
+    /* 十字展开包裹：每侧面一张裁剪纹理 + 展开图画布（尺寸同样一次分配） */
+    const yBpx = Math.round((rowP.h + Math.sin(rowP.tilt || 0) * (k.h / 2 - TI)) * PXS);
+    const yFpx = Math.round((rowP.h - Math.sin(rowP.tilt || 0) * (k.h / 2 - TI)) * PXS);
+    const sideTexs = [
+      [Math.round(k.w * PXS), yBpx],
+      [Math.round(k.h * PXS), Math.round(rowP.h * PXS)],
+      [Math.round(k.w * PXS), yFpx],
+      [Math.round(k.h * PXS), Math.round(rowP.h * PXS)]
+    ].map(([w, h]) => {
       const cv = document.createElement("canvas");
-      cv.width = 4; cv.height = 4;
-      const t = new THREE.CanvasTexture(cv);
-      t.anisotropy = 4;
-      return t;
+      cv.width = w; cv.height = h;
+      return makeCapTexture(cv);
     });
     const netCanvas = document.createElement("canvas");
+    netCanvas.width = Math.round((rowP.h * 2 + (k.w - 2 * TI)) * PXS);
+    netCanvas.height = Math.round((yBpx / PXS + (k.w - 2 * TI) + yFpx / PXS) * PXS);
 
     const mesh = new THREE.Mesh(capGeometry(k, rowP), [...sideMats, bottomMat, topMat]);
     mesh.position.set(px, FLOAT, py);
@@ -476,6 +504,18 @@ class View {
    * 展开图布局：北壁 | 西壁 · 顶面(tw×th) · 东壁 | 南壁
    * 顶面取样 tw×th（真实顶面），四壁按分排高度 yB/yF/ch 取样 ----- */
   _applyWrapNet(c, d, img) {
+    /* 重建纹理对象：同一 CanvasTexture 反复更新后，部分环境的 GPU 上传会
+     * 残留旧内容（重复标志 / 旧帧叠加 = "图中图"），每次应用换新对象根治 */
+    c.tex.dispose();
+    c.tex = makeCapTexture(c.texCanvas);
+    c.topMat.map = c.tex;
+    c.topMat.needsUpdate = true;
+    c.sideTexs.forEach((t, j) => {
+      t.dispose();
+      c.sideTexs[j] = makeCapTexture(t.image);
+      c.sideMats[j].map = c.sideTexs[j];
+      c.sideMats[j].needsUpdate = true;
+    });
     const k = c.k, PX = PXS;
     const tw = k.w - 2 * TI, th = k.h - 2 * TI;
     const tilt = c.tilt || 0;
@@ -489,7 +529,7 @@ class View {
     const NH = Math.max(8, Math.round(netH * PX));
     const net = c.netCanvas;
     if (net.width !== NW || net.height !== NH) { net.width = NW; net.height = NH; }
-    const g = net.getContext("2d", { willReadFrequently: true });
+    const g = net.getContext("2d");
     g.clearRect(0, 0, NW, NH);
     /* 底色填充：图片未覆盖区域显示键帽底色（不透明） */
     g.fillStyle = (d && d.bg) || "#e9ecf5";
@@ -505,12 +545,20 @@ class View {
     ];
     c.netLayout = { px: PX, ch: chH * PX, kh: k.h * PX, topX: topR.x, topY: topR.y, topW: topR.w, topH: topR.h };
 
-    /* 原始比例放置：cover 铺满整个展开图（图片印满模板、包裹全部五面）× 缩放/偏移/旋转可调，
-     * 绝不拉伸变形；展开区域外多出的图片部分自然裁掉 */
-    const s = Math.max(NW / img.naturalWidth, NH / img.naturalHeight) * ((d && d.img && d.img.scale) || 1);
+    /* 原始比例放置 × 缩放/偏移/旋转可调，绝不拉伸变形：
+     * fit=contain 完整放入模板（默认）；fit=cover 铺满模板（裁掉超出部分） */
+    /* 原始比例放置 × 缩放/偏移/旋转可调，绝不拉伸变形：
+     * fit=top（默认）与仅顶面画面一致，余出部分包四壁；
+     * fit=contain 完整放入模板；fit=cover 铺满模板 */
+    const fit = (d && d.img && d.img.fit) || "top";
+    let fitS;
+    if (fit === "contain") fitS = Math.min(NW / img.naturalWidth, NH / img.naturalHeight);
+    else if (fit === "cover") fitS = Math.max(NW / img.naturalWidth, NH / img.naturalHeight);
+    else fitS = Math.max(topR.w / img.naturalWidth, topR.h / img.naturalHeight);
+    const s = fitS * ((d && d.img && d.img.scale) || 1);
     g.save();
-    g.translate(NW / 2 + ((d && d.img && d.img.ox) || 0) * NW,
-                NH / 2 + ((d && d.img && d.img.oy) || 0) * NH);
+    g.translate(topR.x + topR.w / 2 + ((d && d.img && d.img.ox) || 0) * topR.w,
+                topR.y + topR.h / 2 + ((d && d.img && d.img.oy) || 0) * topR.h);
     g.rotate(((d && d.img && d.img.rot) || 0) * Math.PI / 180);
     g.drawImage(img, -img.naturalWidth * s / 2, -img.naturalHeight * s / 2,
                 img.naturalWidth * s, img.naturalHeight * s);
@@ -520,7 +568,7 @@ class View {
     if (c.texCanvas.width !== topR.w || c.texCanvas.height !== topR.h) {
       c.texCanvas.width = topR.w; c.texCanvas.height = topR.h;
     }
-    const gt = c.texCanvas.getContext("2d", { willReadFrequently: true });
+    const gt = c.texCanvas.getContext("2d");
     gt.clearRect(0, 0, topR.w, topR.h);
     gt.drawImage(net, topR.x, topR.y, topR.w, topR.h, 0, 0, topR.w, topR.h);
 
@@ -559,7 +607,7 @@ class View {
       const rw = Math.max(4, Math.round(tp ? r.h : r.w));
       const rh = Math.max(4, Math.round(tp ? r.w : r.h));
       if (cv.width !== rw || cv.height !== rh) { cv.width = rw; cv.height = rh; }
-      const gg = cv.getContext("2d", { willReadFrequently: true });
+      const gg = cv.getContext("2d");
       gg.clearRect(0, 0, rw, rh);
       gg.save();
       if (r.m === "n") {

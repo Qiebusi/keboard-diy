@@ -409,3 +409,43 @@
     at updateNetPreview (http://127.0.0.1:8420/js/app.js?v=45:371:12)
 [ 5609880ms] [WARNING] [.WebGL-0x15c00192200] GL_INVALID_VALUE: glTexSubImage2DRobustANGLE: Offset overflows texture dimensions. @ http://127.0.0.1:8420/index.html?v=45:0
 [ 5609880ms] [WARNING] [.WebGL-0x15c0018c200] GL_INVALID_VALUE: glTexSubImage2DRobustANGLE: Offset overflows texture dimensions. @ http://127.0.0.1:8420/index.html?v=45:0
+[ 6367793ms] [WARNING] [.WebGL-0x15c00193400] GL_INVALID_VALUE: glTexSubImage2DRobustANGLE: Offset overflows texture dimensions. @ http://127.0.0.1:8420/index.html?v=46:0
+[ 6367793ms] [WARNING] [.WebGL-0x15c00191c00] GL_INVALID_VALUE: glTexSubImage2DRobustANGLE: Offset overflows texture dimensions. @ http://127.0.0.1:8420/index.html?v=46:0
+[ 6370026ms] [WARNING] [.WebGL-0x15c00191c00] GL_INVALID_VALUE: glTexSubImage2DRobustANGLE: Offset overflows texture dimensions. @ http://127.0.0.1:8420/index.html?v=46:0
+[ 6370027ms] [WARNING] [.WebGL-0x15c00193400] GL_INVALID_VALUE: glTexSubImage2DRobustANGLE: Offset overflows texture dimensions. @ http://127.0.0.1:8420/index.html?v=46:0
+[ 6497935ms] [WARNING] [.WebGL-0x15c0018ce00] GL_INVALID_VALUE: glTexSubImage2DRobustANGLE: Offset overflows texture dimensions. @ http://127.0.0.1:8420/index.html?v=46:0
+[ 6497936ms] [WARNING] [.WebGL-0x15c01453e00] GL_INVALID_VALUE: glTexSubImage2DRobustANGLE: Offset overflows texture dimensions. @ http://127.0.0.1:8420/index.html?v=46:0
+[15662203ms] ReferenceError: makeCapTexture is not defined
+    at View._buildCap (http://127.0.0.1:8420/js/preview3d.js?v=62:307:17)
+    at http://127.0.0.1:8420/js/preview3d.js?v=62:296:33
+    at Array.forEach (<anonymous>)
+    at View.setScene (http://127.0.0.1:8420/js/preview3d.js?v=62:296:10)
+    at ensureBoardView (http://127.0.0.1:8420/js/app.js?v=62:158:15)
+    at HTMLButtonElement.<anonymous> (http://127.0.0.1:8420/js/app.js?v=62:614:7)
+[15663011ms] ReferenceError: makeCapTexture is not defined
+    at View._buildCap (http://127.0.0.1:8420/js/preview3d.js?v=62:307:17)
+    at View.setTarget (http://127.0.0.1:8420/js/preview3d.js?v=62:422:28)
+    at setSelected (http://127.0.0.1:8420/js/app.js?v=62:182:18)
+    at HTMLCanvasElement.<anonymous> (http://127.0.0.1:8420/js/app.js?v=62:250:5)
+[15663343ms] ReferenceError: makeCapTexture is not defined
+    at View._buildCap (http://127.0.0.1:8420/js/preview3d.js?v=62:307:17)
+    at View.setTarget (http://127.0.0.1:8420/js/preview3d.js?v=62:422:28)
+    at setSelected (http://127.0.0.1:8420/js/app.js?v=62:182:18)
+    at reader.onload (http://127.0.0.1:8420/js/app.js?v=62:346:7)
+[15895504ms] ReferenceError: makeCapTexture is not defined
+    at View._buildCap (http://127.0.0.1:8420/js/preview3d.js?v=63:311:17)
+    at http://127.0.0.1:8420/js/preview3d.js?v=63:296:33
+    at Array.forEach (<anonymous>)
+    at View.setScene (http://127.0.0.1:8420/js/preview3d.js?v=63:296:10)
+    at ensureBoardView (http://127.0.0.1:8420/js/app.js?v=62:158:15)
+    at HTMLButtonElement.<anonymous> (http://127.0.0.1:8420/js/app.js?v=62:614:7)
+[15896315ms] ReferenceError: makeCapTexture is not defined
+    at View._buildCap (http://127.0.0.1:8420/js/preview3d.js?v=63:311:17)
+    at View.setTarget (http://127.0.0.1:8420/js/preview3d.js?v=63:435:28)
+    at setSelected (http://127.0.0.1:8420/js/app.js?v=62:182:18)
+    at HTMLCanvasElement.<anonymous> (http://127.0.0.1:8420/js/app.js?v=62:250:5)
+[15896649ms] ReferenceError: makeCapTexture is not defined
+    at View._buildCap (http://127.0.0.1:8420/js/preview3d.js?v=63:311:17)
+    at View.setTarget (http://127.0.0.1:8420/js/preview3d.js?v=63:435:28)
+    at setSelected (http://127.0.0.1:8420/js/app.js?v=62:182:18)
+    at reader.onload (http://127.0.0.1:8420/js/app.js?v=62:346:7)

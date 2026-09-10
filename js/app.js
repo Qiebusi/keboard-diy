@@ -135,6 +135,7 @@
        board3d 初始 display:none —— WebGL 上下文在隐藏画布上创建会导致
        合成显示异常（画面陈旧/发黑），因此延迟到首次进入 3D 模式再创建 */
     singleView = P3.createSingleView($("key3d"), { getImg });
+    window.__dbs = singleView; /* 调试用 */
     if (state.selected != null) {
       singleView.setTarget(state.keys[state.selected], state.designs[state.selected]);
     }
@@ -157,6 +158,7 @@
     boardView.setScene(state.keys, state.designs, state.plateColor, state.profile);
     boardView.setSelected(state.selected);
     boardView.setActive(true);
+    window.__dbv = boardView; /* 调试用 */
   }
 
   function sync3DViews() {
@@ -339,7 +341,7 @@
     reader.onload = () => {
       const d = state.designs[index] || (state.designs[index] = defaultDesign(state.keys[index]));
       /* 保留当前贴图模式（wrap），仅替换图片数据与变换参数 */
-      d.img = { data: reader.result, wrap: d.img ? d.img.wrap : undefined, scale: 1, rot: 0, ox: 0, oy: 0 };
+      d.img = { data: reader.result, wrap: d.img ? d.img.wrap : undefined, fit: d.img ? (d.img.fit || "top") : "top", scale: 1, rot: 0, ox: 0, oy: 0 };
       touchDesign(d);
       setSelected(index);
       autosave();
@@ -367,7 +369,7 @@
     const i = state.selected;
     const d = i != null ? state.designs[i] : null;
     const wrapEl = $("netPreviewWrap");
-    const show = !!(d && d.img && d.img.wrap === "net") && i != null && !!boardView;
+    const show = !!(d && d.img && d.img.wrap === "net") && i != null;
     wrapEl.style.display = show ? "" : "none";
     if (!show) return;
 
@@ -416,10 +418,16 @@
     g.fillStyle = d.bg || "#e9ecf5";
     g.fill();
     g.clip();
-    const img = d.img ? boardView ? boardView.getImg(d.img.data) : null : null;
+    const img = d.img ? getImg(d.img.data) : null;
     if (img && img.complete && img.naturalWidth > 0) {
-      const s2 = Math.max(wpx / img.naturalWidth, hpx / img.naturalHeight) * (d.img.scale || 1);
-      g.translate(wpx / 2 + (d.img.ox || 0) * wpx, hpx / 2 + (d.img.oy || 0) * hpx);
+      const fit = d.img.fit || "top";
+      let fitS2;
+      if (fit === "contain") fitS2 = Math.min(wpx / img.naturalWidth, hpx / img.naturalHeight);
+      else if (fit === "cover") fitS2 = Math.max(wpx / img.naturalWidth, hpx / img.naturalHeight);
+      else fitS2 = Math.max((tw * s) / img.naturalWidth, (th * s) / img.naturalHeight);
+      const s2 = fitS2 * (d.img.scale || 1);
+      g.translate(ch * s + tw * s / 2 + (d.img.ox || 0) * tw * s,
+                  yB * s + th * s / 2 + (d.img.oy || 0) * th * s);
       g.rotate((d.img.rot || 0) * Math.PI / 180);
       g.drawImage(img, -img.naturalWidth * s2 / 2, -img.naturalHeight * s2 / 2,
                   img.naturalWidth * s2, img.naturalHeight * s2);
@@ -474,10 +482,61 @@
     $("imgControls").style.display = hasImg ? "" : "none";
     if (hasImg) {
       syncImageSliders(d.img);
-      $("imgWrap").value = d.img.wrap === "net" ? "net" : "top";
+      const net = d.img.wrap === "net";
+      $("imgWrap").value = net ? "net" : "top";
+      $("imgFitField").style.display = net ? "" : "none";
+      $("imgFit").value = d.img.fit === "cover" ? "cover" : (d.img.fit === "contain" ? "contain" : "top");
       updateNetPreview();
     }
   }
+
+  /* ---------- 十字预览：拖拽移动原图（3D 同步更新） ---------- */
+  (() => {
+    const cv = $("netPreview");
+    let drag = null;
+    cv.addEventListener("pointerdown", e => {
+      const i = state.selected;
+      const d = i != null ? state.designs[i] : null;
+      if (!d || !d.img || d.img.wrap !== "net") return;
+      drag = { x: e.clientX, y: e.clientY, ox: d.img.ox || 0, oy: d.img.oy || 0 };
+      cv.setPointerCapture(e.pointerId);
+    });
+    cv.addEventListener("pointermove", e => {
+      if (!drag) return;
+      const i = state.selected;
+      const d = i != null ? state.designs[i] : null;
+      if (!d || !d.img) { drag = null; return; }
+      const r = cv.getBoundingClientRect();
+      d.img.ox = drag.ox + (e.clientX - drag.x) / r.width;
+      d.img.oy = drag.oy + (e.clientY - drag.y) / r.height;
+      $("imgX").value = d.img.ox; $("imgXVal").textContent = d.img.ox.toFixed(2);
+      $("imgY").value = d.img.oy; $("imgYVal").textContent = d.img.oy.toFixed(2);
+      touchDesign(d);
+      updateNetPreview();
+      autosave();
+    });
+    const end = () => { drag = null; };
+    cv.addEventListener("pointerup", end);
+    cv.addEventListener("pointercancel", end);
+  })();
+
+  /* ---------- 单键 3D 预览放大 ---------- */
+  (() => {
+    const overlay = $("key3dOverlay"), stage = $("key3dOverlayStage");
+    const canvas = $("key3d");
+    const homeStage = canvas.parentElement;
+    $("btnZoomKey3d").addEventListener("click", () => {
+      stage.appendChild(canvas);
+      overlay.classList.add("show");
+    });
+    const close = () => {
+      if (!overlay.classList.contains("show")) return;
+      homeStage.appendChild(canvas);
+      overlay.classList.remove("show");
+    };
+    $("btnZoomClose").addEventListener("click", close);
+    window.addEventListener("keydown", e => { if (e.key === "Escape") close(); });
+  })();
 
   function syncImageSliders(img) {
     $("imgScale").value = img.scale;
@@ -514,7 +573,13 @@
     toast("图例颜色已恢复自动配色");
   });
 
-  bindDesign((d, el) => { if (d.img) { d.img.wrap = el.value; } }, $("imgWrap"));
+  bindDesign((d, el) => {
+    if (d.img) {
+      d.img.wrap = el.value;
+      $("imgFitField").style.display = el.value === "net" ? "" : "none";
+    }
+  }, $("imgWrap"));
+  bindDesign((d, el) => { if (d.img) { d.img.fit = el.value; } }, $("imgFit"));
   bindDesign((d, el) => { if (d.img) { d.img.scale = +el.value; $("imgScaleVal").textContent = (+el.value).toFixed(2) + "x"; } }, $("imgScale"));
   bindDesign((d, el) => { if (d.img) { d.img.rot = +el.value; $("imgRotVal").textContent = Math.round(+el.value) + "°"; } }, $("imgRot"));
   bindDesign((d, el) => { if (d.img) { d.img.ox = +el.value; $("imgXVal").textContent = (+el.value).toFixed(2); } }, $("imgX"));
@@ -547,6 +612,11 @@
       canvas3d.style.width = (scrollWrap.clientWidth - 48) + "px";
       canvas3d.style.height = (scrollWrap.clientHeight - 48) + "px";
       ensureBoardView();
+      /* 再次进入 3D：ensureBoardView 会因实例已存在而跳过，必须重新激活渲染循环 */
+      if (boardView) {
+        boardView.setActive(true);
+        boardView.setSelected(state.selected);
+      }
     } else if (boardView) {
       boardView.setActive(false);
     }
