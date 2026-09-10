@@ -341,7 +341,7 @@
     reader.onload = () => {
       const d = state.designs[index] || (state.designs[index] = defaultDesign(state.keys[index]));
       /* 保留当前贴图模式（wrap），仅替换图片数据与变换参数 */
-      d.img = { data: reader.result, wrap: d.img ? d.img.wrap : undefined, fit: d.img ? (d.img.fit || "top") : "top", scale: 1, rot: 0, ox: 0, oy: 0 };
+      d.img = { data: reader.result, wrap: d.img ? d.img.wrap : undefined, scale: 1, rot: 0, ox: 0, oy: 0 };
       touchDesign(d);
       setSelected(index);
       autosave();
@@ -420,12 +420,8 @@
     g.clip();
     const img = d.img ? getImg(d.img.data) : null;
     if (img && img.complete && img.naturalWidth > 0) {
-      const fit = d.img.fit || "top";
-      let fitS2;
-      if (fit === "contain") fitS2 = Math.min(wpx / img.naturalWidth, hpx / img.naturalHeight);
-      else if (fit === "cover") fitS2 = Math.max(wpx / img.naturalWidth, hpx / img.naturalHeight);
-      else fitS2 = Math.max((tw * s) / img.naturalWidth, (th * s) / img.naturalHeight);
-      const s2 = fitS2 * (d.img.scale || 1);
+      /* 顶面优先：铺满顶面区域，余出部分包四壁 */
+      const s2 = Math.max((tw * s) / img.naturalWidth, (th * s) / img.naturalHeight) * (d.img.scale || 1);
       g.translate(ch * s + tw * s / 2 + (d.img.ox || 0) * tw * s,
                   yB * s + th * s / 2 + (d.img.oy || 0) * th * s);
       g.rotate((d.img.rot || 0) * Math.PI / 180);
@@ -484,8 +480,6 @@
       syncImageSliders(d.img);
       const net = d.img.wrap === "net";
       $("imgWrap").value = net ? "net" : "top";
-      $("imgFitField").style.display = net ? "" : "none";
-      $("imgFit").value = d.img.fit === "cover" ? "cover" : (d.img.fit === "contain" ? "contain" : "top");
       updateNetPreview();
     }
   }
@@ -573,13 +567,7 @@
     toast("图例颜色已恢复自动配色");
   });
 
-  bindDesign((d, el) => {
-    if (d.img) {
-      d.img.wrap = el.value;
-      $("imgFitField").style.display = el.value === "net" ? "" : "none";
-    }
-  }, $("imgWrap"));
-  bindDesign((d, el) => { if (d.img) { d.img.fit = el.value; } }, $("imgFit"));
+  bindDesign((d, el) => { if (d.img) { d.img.wrap = el.value; } }, $("imgWrap"));
   bindDesign((d, el) => { if (d.img) { d.img.scale = +el.value; $("imgScaleVal").textContent = (+el.value).toFixed(2) + "x"; } }, $("imgScale"));
   bindDesign((d, el) => { if (d.img) { d.img.rot = +el.value; $("imgRotVal").textContent = Math.round(+el.value) + "°"; } }, $("imgRot"));
   bindDesign((d, el) => { if (d.img) { d.img.ox = +el.value; $("imgXVal").textContent = (+el.value).toFixed(2); } }, $("imgX"));

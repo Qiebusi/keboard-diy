@@ -548,14 +548,8 @@ class View {
     /* 原始比例放置 × 缩放/偏移/旋转可调，绝不拉伸变形：
      * fit=contain 完整放入模板（默认）；fit=cover 铺满模板（裁掉超出部分） */
     /* 原始比例放置 × 缩放/偏移/旋转可调，绝不拉伸变形：
-     * fit=top（默认）与仅顶面画面一致，余出部分包四壁；
-     * fit=contain 完整放入模板；fit=cover 铺满模板 */
-    const fit = (d && d.img && d.img.fit) || "top";
-    let fitS;
-    if (fit === "contain") fitS = Math.min(NW / img.naturalWidth, NH / img.naturalHeight);
-    else if (fit === "cover") fitS = Math.max(NW / img.naturalWidth, NH / img.naturalHeight);
-    else fitS = Math.max(topR.w / img.naturalWidth, topR.h / img.naturalHeight);
-    const s = fitS * ((d && d.img && d.img.scale) || 1);
+     * 铺满顶面区域（与仅顶面画面一致），余出部分包四壁 */
+    const s = Math.max(topR.w / img.naturalWidth, topR.h / img.naturalHeight) * ((d && d.img && d.img.scale) || 1);
     g.save();
     g.translate(topR.x + topR.w / 2 + ((d && d.img && d.img.ox) || 0) * topR.w,
                 topR.y + topR.h / 2 + ((d && d.img && d.img.oy) || 0) * topR.h);
