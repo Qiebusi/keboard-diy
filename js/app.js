@@ -573,6 +573,22 @@
   bindDesign((d, el) => { if (d.img) { d.img.ox = +el.value; $("imgXVal").textContent = (+el.value).toFixed(2); } }, $("imgX"));
   bindDesign((d, el) => { if (d.img) { d.img.oy = +el.value; $("imgYVal").textContent = (+el.value).toFixed(2); } }, $("imgY"));
 
+  /* 全局键帽颜色：一次修改全部键帽底色（不影响图例/图片） */
+  $("capColorAll").addEventListener("input", e => {
+    const v = e.target.value;
+    state.keys.forEach((k, i) => {
+      if (!state.designs[i]) return;
+      state.designs[i].bg = v;
+      touchDesign(state.designs[i]);
+    });
+    if (singleView && state.selected != null) {
+      singleView.setTarget(state.keys[state.selected], state.designs[state.selected]);
+    }
+    markDirty();
+    syncPanel();
+    autosave();
+  });
+
   $("plateColor").addEventListener("input", e => {
     state.plateColor = e.target.value;
     if (boardView) boardView.setPlateColor(state.plateColor);
@@ -778,6 +794,7 @@
         state.designs[idx] = merged;
       }
     }
+    $("capColorAll").value = (state.designs[0] && state.designs[0].bg) || "#e9ecf5";
     sync3DViews();
     markDirty();
     return true;
