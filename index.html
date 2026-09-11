@@ -5,9 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>键帽工坊 · Keycap Studio</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%231c1b1a'/%3E%3Crect x='6' y='6' width='20' height='20' rx='4' fill='%23d9480f'/%3E%3Crect x='10' y='10' width='12' height='12' rx='2.5' fill='%23f4f1ea'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="css/style.css?v=2">
+<link rel="stylesheet" href="css/style.css?v=3">
+<style>[v-cloak]{display:none}</style>
 </head>
 <body>
+
+<div id="app" v-cloak>
 
 <header class="topbar">
   <div class="brand">
@@ -20,31 +23,32 @@
 
   <div class="toolbar">
     <label class="field">
-      <select id="layoutSelect">
+      <select :value="state.layoutName" @change="onLayoutChange($event)">
         <option value="60">60% · 61 键</option>
         <option value="75">75% · 87 键</option>
         <option value="tkl">87 键 TKL</option>
         <option value="full">104 键全尺寸</option>
+        <option v-if="state.customRows" value="custom">KLE 自定义布局</option>
       </select>
     </label>
 
-    <button id="btnImportKLE" class="btn ghost" title="导入 Keyboard Layout Editor (KLE) JSON 布局">导入 KLE</button>
-    <button id="btn3d" class="btn">3D 预览</button>
+    <button class="btn ghost" @click="importKLEClick" title="导入 Keyboard Layout Editor (KLE) JSON 布局">导入 KLE</button>
+    <button id="btn3d" class="btn" :class="{active: state.mode === '3d'}" @click="toggle3d">{{ state.mode === '3d' ? '返回平面' : '3D 预览' }}</button>
     <span class="sep"></span>
-    <button id="btnExportBoard" class="btn">导出整盘</button>
-    <button id="btnExportKey" class="btn">导出当前键帽</button>
+    <button class="btn" @click="exportBoard">导出整盘</button>
+    <button class="btn" @click="exportKey">导出当前键帽</button>
     <span class="sep"></span>
-    <button id="btnSave" class="btn ghost">保存工程</button>
-    <button id="btnLoad" class="btn ghost">载入工程</button>
-    <button id="btnClear" class="btn ghost danger">清空</button>
+    <button class="btn ghost" @click="saveProject">保存工程</button>
+    <button class="btn ghost" @click="loadProjectClick">载入工程</button>
+    <button class="btn ghost danger" @click="clearAll">清空</button>
   </div>
 </header>
 
 <main class="workspace">
   <section class="canvas-area">
-    <div class="canvas-scroll" id="canvasScroll">
-      <canvas id="board"></canvas>
-      <canvas id="board3d" style="display:none"></canvas>
+    <div class="canvas-scroll" ref="scrollRef">
+      <canvas id="board" ref="boardRef" v-show="state.mode !== '3d'"></canvas>
+      <canvas id="board3d" ref="board3dRef" v-show="state.mode === '3d'"></canvas>
     </div>
 
     <!-- 单键 3D 预览 -->
@@ -52,26 +56,26 @@
       <div class="key3d-head">
         <span class="tag">单键 3D 预览</span>
         <span class="key3d-actions">
-          <button id="btnZoomKey3d" class="btn tiny">放大</button>
-          <button id="btnExportKey3d" class="btn tiny" disabled>导出</button>
+          <button class="btn tiny" @click="zoomOpen">放大</button>
+          <button class="btn tiny" :disabled="!hasSel" @click="exportKey3d">导出</button>
         </span>
       </div>
-      <div class="key3d-stage">
-        <canvas id="key3d"></canvas>
-        <div class="key3d-empty" id="key3dEmpty">在键盘中点击一颗键帽<br><small>拖拽旋转 · 滚轮缩放</small></div>
+      <div class="key3d-stage" ref="key3dHomeRef">
+        <canvas id="key3d" ref="key3dRef" v-show="hasSel"></canvas>
+        <div class="key3d-empty" v-show="!hasSel">在键盘中点击一颗键帽<br><small>拖拽旋转 · 滚轮缩放</small></div>
       </div>
     </div>
 
-    <div class="hintbar" id="hintbar"></div>
+    <div class="hintbar" v-html="hint"></div>
   </section>
 
   <aside class="panel" id="panel">
-    <div class="panel-empty" id="panelEmpty">在左侧点击一个键帽开始设计</div>
+    <div class="panel-empty" v-if="!hasSel">在左侧点击一个键帽开始设计</div>
 
-    <div id="panelBody" style="display:none">
+    <div v-else>
       <div class="key-head">
-        <div class="key-title" id="keyTitle">A</div>
-        <div class="key-sub mono" id="keySub">1u · 19.05mm</div>
+        <div class="key-title">{{ keyTitle }}</div>
+        <div class="key-sub mono">{{ keySub }}</div>
       </div>
 
       <section class="card">
@@ -79,71 +83,71 @@
         <div class="row">
           <label class="field grow">
             <span>底色</span>
-            <input type="color" id="keyBg" value="#e9ecf5">
+            <input type="color" :value="curDesign.bg" @input="setCur('bg', $event.target.value)">
           </label>
           <label class="field grow">
             <span>图例颜色</span>
             <div class="color-line">
-              <input type="color" id="legendColor" value="#3a3d46">
-              <button id="legendAuto" class="btn tiny ghost" title="跟随底色自动配色">自动</button>
+              <input type="color" :value="curDesign.legendColor || autoLegend" @input="setCur('legendColor', $event.target.value)">
+              <button class="btn tiny ghost" @click="legendAuto" title="跟随底色自动配色">自动</button>
             </div>
           </label>
         </div>
         <label class="field">
           <span>图例文字（留空隐藏）</span>
-          <input type="text" id="legendText" maxlength="16" placeholder="例如：A / Esc / 自定义">
+          <input type="text" maxlength="16" placeholder="例如：A / Esc / 自定义" :value="curDesign.legend || ''" @input="setCur('legend', $event.target.value)">
         </label>
         <label class="field">
-          <span>图例大小 <b id="legendSizeVal">1.00x</b></span>
-          <input type="range" id="legendSize" min="0.5" max="1.8" step="0.05" value="1">
+          <span>图例大小 <b>{{ (curDesign.legendSize || 1).toFixed(2) }}x</b></span>
+          <input type="range" min="0.5" max="1.8" step="0.05" :value="curDesign.legendSize || 1" @input="setCur('legendSize', +$event.target.value)">
         </label>
       </section>
 
       <section class="card">
         <h3 class="mono">图片贴图</h3>
         <div class="upload-zone" id="uploadZone">
-          <input type="file" id="imgInput" accept="image/*" hidden>
-          <button class="btn primary" id="btnUpload">上传图片</button>
+          <input type="file" accept="image/*" hidden ref="imgInputRef" @change="onImgFile($event)">
+          <button class="btn primary" @click="uploadClick">上传图片</button>
           <small> JPG / PNG / WebP · 自动铺满键帽顶面<br>也可拖入图片或 Ctrl+V 粘贴</small>
         </div>
 
-        <div id="imgControls">
+        <div v-if="curDesign.img">
           <label class="field">
             <span>贴图范围</span>
-            <select id="imgWrap">
+            <select :value="imgWrapShown" @change="setImg('wrap', $event.target.value)">
               <option value="top">仅顶面</option>
               <option value="net">十字展开包裹（顶面+四壁）</option>
             </select>
           </label>
-          <div id="netPreviewWrap" hidden>
+          <div v-show="netShow">
             <span class="mono">取模预览 · 十字展开</span>
-            <canvas id="netPreview"></canvas>
+            <canvas id="netPreview" ref="netPreviewRef"></canvas>
           </div>
           <label class="field">
-            <span>缩放 <b id="imgScaleVal">1.00x</b></span>
-            <input type="range" id="imgScale" min="0.2" max="4" step="0.01" value="1">
+            <span>缩放 <b>{{ (curDesign.img.scale || 1).toFixed(2) }}x</b></span>
+            <input type="range" min="0.2" max="4" step="0.01" :value="curDesign.img.scale || 1" @input="setImg('scale', +$event.target.value)">
           </label>
           <label class="field">
-            <span>旋转 <b id="imgRotVal">0°</b></span>
-            <input type="range" id="imgRot" min="-180" max="180" step="1" value="0">
+            <span>旋转 <b>{{ Math.round(curDesign.img.rot || 0) }}°</b></span>
+            <input type="range" min="-180" max="180" step="1" :value="curDesign.img.rot || 0" @input="setImg('rot', +$event.target.value)">
           </label>
           <label class="field">
-            <span>水平位置 <b id="imgXVal">0.00</b></span>
-            <input type="range" id="imgX" min="-1" max="1" step="0.01" value="0">
+            <span>水平位置 <b>{{ (curDesign.img.ox || 0).toFixed(2) }}</b></span>
+            <input type="range" min="-1" max="1" step="0.01" :value="curDesign.img.ox || 0" @input="setImg('ox', +$event.target.value)">
           </label>
           <label class="field">
-            <span>垂直位置 <b id="imgYVal">0.00</b></span>
-            <input type="range" id="imgY" min="-1" max="1" step="0.01" value="0">
+            <span>垂直位置 <b>{{ (curDesign.img.oy || 0).toFixed(2) }}</b></span>
+            <input type="range" min="-1" max="1" step="0.01" :value="curDesign.img.oy || 0" @input="setImg('oy', +$event.target.value)">
           </label>
-          <button class="btn ghost small" id="btnRemoveImg">移除图片</button>
+          <button class="btn ghost small" @click="removeImg">移除图片</button>
         </div>
       </section>
 
       <section class="card">
         <h3 class="mono">快捷操作</h3>
         <div class="btn-grid">
-          <button class="btn ghost small" id="btnApplyAll">此设计应用到全部键</button>
-          <button class="btn ghost small" id="btnResetKey">重置此键</button>
+          <button class="btn ghost small" @click="applyAll">此设计应用到全部键</button>
+          <button class="btn ghost small" @click="resetKey">重置此键</button>
         </div>
       </section>
     </div>
@@ -152,7 +156,7 @@
       <h3 class="mono">全局</h3>
       <label class="field">
         <span>键帽高度档案（3D）</span>
-        <select id="profileSelect">
+        <select :value="state.profile" @change="onProfileChange($event)">
           <option value="oem">OEM · 常见机械键盘</option>
           <option value="cherry">Cherry · 原厂低矮</option>
           <option value="sa">SA · 高球帽</option>
@@ -162,30 +166,33 @@
       </label>
       <label class="field">
         <span>全局键帽颜色</span>
-        <input type="color" id="capColorAll" value="#e9ecf5">
+        <input type="color" id="capColorAll" :value="capColorAll" @input="applyGlobalColor($event)">
       </label>
       <label class="field">
         <span>键盘底板颜色</span>
-        <input type="color" id="plateColor" value="#23252f">
+        <input type="color" :value="state.plateColor" @input="state.plateColor = $event.target.value">
       </label>
     </section>
   </aside>
 </main>
 
-<div class="toast" id="toast"></div>
-<input type="file" id="kleInput" accept=".json,application/json" hidden>
-<input type="file" id="projInput" accept=".json,application/json" hidden>
+<div class="toast" :class="{show: toastOn}">{{ toastMsg }}</div>
+<input type="file" accept=".json,application/json" hidden ref="kleInputRef" @change="onKLEFile($event)">
+<input type="file" accept=".json,application/json" hidden ref="projInputRef" @change="onProjFile($event)">
 
   <!-- 单键 3D 预览放大层 -->
-  <div id="key3dOverlay">
-    <div class="key3d-overlay-stage" id="key3dOverlayStage"></div>
-    <button id="btnZoomClose" class="btn tiny">退出放大 (Esc)</button>
+  <div id="key3dOverlay" :class="{show: zoom3d}">
+    <div class="key3d-overlay-stage" ref="overlayStageRef"></div>
+    <button id="btnZoomClose" class="btn tiny" @click="zoomClose">退出放大 (Esc)</button>
   </div>
 
+</div>
+
 <script src="js/lib/three.min.js?v=16"></script>
+<script src="js/lib/vue.global.prod.js?v=1"></script>
 <script src="js/layout.js?v=28"></script>
 <script src="js/render.js?v=16"></script>
 <script src="js/preview3d.js?v=70"></script>
-<script src="js/app.js?v=71"></script>
+<script src="js/vue-app.js?v=2"></script>
 </body>
 </html>

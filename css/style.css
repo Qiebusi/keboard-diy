@@ -29,6 +29,9 @@ html, body {
   overflow: hidden;
 }
 
+/* Vue 挂载层：延续 html/body 的 100% 高度链，保证 .workspace 高度计算成立 */
+#app { height: 100%; }
+
 .mono { font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; }
 .tag { font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; color: var(--ink-2); }
 
