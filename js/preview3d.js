@@ -1,11 +1,21 @@
 /* =========================================================
  * 3D 键盘预览（Three.js / WebGL，UMD 全局 THREE）
- * - 全部使用 MeshBasicMaterial + CPU 烘焙明暗：
- *   不依赖灯光/驱动，任何机器渲染结果一致（杜绝发黑）
- * - 真实键帽结构：裙边悬浮于底板上方，露出轴体上座与十字轴心
- * - 分排高度/倾角（OEM / Cherry / SA / DSA / XDA）
- * - 贴图十字展开：图片按“十字展开图”取模贴装，
- *   顶面取图案中心，四壁取相邻区域，跨界连续（真正的包裹）
+ *
+ * 架构（对齐轻量渲染器的设计）：
+ *   每颗键帽 = 1 份几何 + 1 张纹理 + 1 个材质 + 1 次 draw call
+ *
+ * 核心设计：十字展开图即纹理图集。
+ *   每键一张"展开图画布"（顶面 + 四壁 + 底面色条），
+ *   几何 UV 直接映射到展开图各区域——折叠翻转/转置全部在 UV 中完成，
+ *   不存在侧壁纹理、材质数组、分组切换。
+ *   - 未包裹模式：图片只画进顶面区域，四壁为纯底色
+ *   - 十字包裹模式：图片铺满整张展开图，自然延续到四壁
+ *
+ * 性能约定：
+ *   - 按需渲染（脏标记），静止零 GPU 开销
+ *   - 阴影贴图仅在场景几何变化时烘焙
+ *   - 轴体使用 InstancedMesh（整盘共 3 次 draw call）
+ *   - 键帽/底板矩阵冻结（静态物件）
  * ========================================================= */
 
 (() => {
@@ -15,21 +25,14 @@ if (!window.THREE) {
 }
 
 const TI = 0.125;          // 顶面内缩（1u 顶面 ≈ 0.66u，与实物一致）
-const PXU = 200;           // 纹理分辨率（px / u）——全模式统一，避免画布反复 resize
-const PXS = PXU;           // 包裹展开图分辨率（与顶面一致）
+const PXU = 200;           // 纹理分辨率（px / u）
 const FOV = 40;
 const FLOAT = 0.34;        // 裙边底部离底板高度（露出轴体上座）
+const BP = 6;              // 展开图画布底部预留色条高度（底面采样区，px）
 const STEM = new THREE.Color(0x17181d);   // 轴体颜色
-const ACCENT = new THREE.Color(0xd9480f);
-const SIDE_UV = [[0, 0], [1, 0], [1, 1], [0, 1]];
+const ACCENT = new THREE.Color(0xd9480f); // 选中强调色
 
-/* 侧向明暗烘焙系数（固定光向：左前上方）北 东 南 西 */
-const SIDE_SHADE = [ -18, -38, -26, -30 ];
-const SIDE_BLEND = [0.45, 0.6, 0.5, 0.55];
-
-/* 键帽纹理统一创建：禁 mipmap + 线性过滤（NPOT 画布必需）
- * 注意：纹理画布不要加 willReadFrequently —— 该选项使画布走软件光栅化，
- * Chromium 下作为 WebGL 纹理上传时会读到陈旧副本（表现为贴图残留/图中小图） */
+/* 键帽纹理：禁 mipmap + 线性过滤（NPOT 画布必需；mipmap 会采样到陈旧链层） */
 function makeCapTexture(cv) {
   const t = new THREE.CanvasTexture(cv);
   t.generateMipmaps = false;
@@ -65,7 +68,7 @@ function makeStudioEnv() {
   return t;
 }
 
-/* ---------- 顶面纹理绘制（仅顶面模式，与平面渲染一致） ---------- */
+/* ---------- 绘制工具 ---------- */
 function roundRect(g, x, y, w, h, r) {
   r = Math.min(r, w / 2, h / 2);
   g.beginPath();
@@ -73,172 +76,181 @@ function roundRect(g, x, y, w, h, r) {
   g.arcTo(x + w, y, x + w, y + r, r);
   g.lineTo(x + w, y + h - r);
   g.arcTo(x + w, y + h, x + w - r, y + h, r);
-  g.lineTo(x + r, y + h);
+  g.lineTo(x, y + h);
   g.arcTo(x, y + h, x, y + h - r, r);
   g.lineTo(x, y + r);
   g.arcTo(x, y, x + r, y, r);
   g.closePath();
 }
 
-function drawLegend(g, d, k, regionW, regionH) {
-  const legend = d && d.legend != null ? d.legend : k.label;
-  if (!legend) return;
-  const bg = (d && d.bg) || "#e9ecf5";
-  const color = (d && d.legendColor) || (Render.luminance(bg) > 0.55 ? "#3a3d46" : "#e8eaf2");
-  const fs = Math.min(regionH * 0.36 * ((d && d.legendSize) || 1), 0.28 * PXU);
-  g.fillStyle = color;
-  g.font = `600 ${Math.max(8, fs)}px Inter, "Segoe UI", "Microsoft YaHei", sans-serif`;
-  g.textAlign = "left";
-  g.textBaseline = "top";
-  const pad = Math.min(regionW, regionH) * 0.11;
-  g.fillText(legend, pad, pad * 0.9);
+function legendColor(d) {
+  return (d && d.legendColor) ||
+    (Render.luminance((d && d.bg) || "#e9ecf5") > 0.55 ? "#3a3d46" : "#e8eaf2");
 }
 
-function drawTopCanvas(cv, k, d, getImg) {
+/* ---------- 展开图布局（u 单位；画布像素 = u × PXU） ----------
+ * 布局：      [北壁 yB]
+ * [西壁 ch] [顶面 tw×th] [东壁 ch]
+ *           [南壁 yF]
+ * 相邻区域重叠 TI，保证折叠线两侧图案连续                       */
+function netDims(k, rowP) {
   const tw = k.w - 2 * TI, th = k.h - 2 * TI;
-  const TW = Math.max(8, Math.round(tw * PXU));
-  const TH = Math.max(8, Math.round(th * PXU));
-  if (cv.width !== TW || cv.height !== TH) { cv.width = TW; cv.height = TH; }
-  /* 注意：纹理画布不要加 willReadFrequently —— 该选项使画布走软件光栅化，
-   * Chromium 下作为 WebGL 纹理上传时会读到陈旧副本（表现为贴图残留/图中小图） */
+  const ch = rowP.h, tilt = rowP.tilt || 0;
+  const yB = ch + Math.sin(tilt) * (k.h / 2 - TI);
+  const yF = ch - Math.sin(tilt) * (k.h / 2 - TI);
+  return {
+    tw, th, ch, yB, yF, kw: k.w, kh: k.h,
+    NW: Math.max(8, Math.round((ch + tw + ch) * PXU)),
+    NH: Math.max(8, Math.round((yB + th + yF) * PXU))
+  };
+}
+
+/* ---------- 展开图绘制（唯一的纹理内容来源） ----------
+ * 底色铺满 → 底面色条 → 图片（顶面 cover / 十字包裹）→ 顶面图例与光影 */
+function drawNetCanvas(cv, dims, d, k, getImg) {
+  const { NW, NH } = dims;
+  if (cv.width !== NW || cv.height !== NH + BP) { cv.width = NW; cv.height = NH + BP; }
   const g = cv.getContext("2d");
-  g.clearRect(0, 0, TW, TH);
-
   const bg = (d && d.bg) || "#e9ecf5";
-  const r = 0.10 * PXU;
 
-  roundRect(g, 0, 0, TW, TH, r);
+  g.clearRect(0, 0, NW, NH + BP);
   g.fillStyle = bg;
-  g.fill();
+  g.fillRect(0, 0, NW, NH + BP);
+  g.fillStyle = Render.shade(bg, -58);          // 底面（深一档）
+  g.fillRect(0, NH, NW, BP);
 
-  if (d && d.img && d.img.data) {
-    const el = getImg(d.img.data);
-    if (el && el.complete && el.naturalWidth > 0) {
-      g.save();
-      roundRect(g, 0, 0, TW, TH, r);
-      g.clip();
-      const base = Math.max(TW / el.naturalWidth, TH / el.naturalHeight);
-      const s = base * (d.img.scale || 1);
-      g.translate(TW / 2 + (d.img.ox || 0) * TW, TH / 2 + (d.img.oy || 0) * TH);
-      g.rotate((d.img.rot || 0) * Math.PI / 180);
-      g.drawImage(el, -el.naturalWidth * s / 2, -el.naturalHeight * s / 2, el.naturalWidth * s, el.naturalHeight * s);
-      g.restore();
-    }
+  const S = PXU;
+  const tx = dims.ch * S, ty = dims.yB * S, tw = dims.tw * S, th = dims.th * S;
+
+  /* 图片：cover 以顶面为基准；wrap=net 时不裁剪，铺满整张展开图包住四壁 */
+  const img = d && d.img && d.img.data ? getImg(d.img.data) : null;
+  if (img && img.complete && img.naturalWidth > 0) {
+    const wrapNet = d.img.wrap === "net";
+    const s = Math.max(tw / img.naturalWidth, th / img.naturalHeight) * (d.img.scale || 1);
+    g.save();
+    if (!wrapNet) { roundRect(g, tx, ty, tw, th, 0.10 * PXU); g.clip(); }
+    g.translate(tx + tw / 2 + (d.img.ox || 0) * tw, ty + th / 2 + (d.img.oy || 0) * th);
+    g.rotate((d.img.rot || 0) * Math.PI / 180);
+    g.drawImage(img, -img.naturalWidth * s / 2, -img.naturalHeight * s / 2,
+      img.naturalWidth * s, img.naturalHeight * s);
+    g.restore();
   }
 
-  /* 顶面冠部光影 */
+  /* 顶面图例 + 冠部光影（仅顶面区域） */
   g.save();
-  roundRect(g, 0, 0, TW, TH, r);
+  roundRect(g, tx, ty, tw, th, 0.10 * PXU);
   g.clip();
-  const gr = g.createLinearGradient(0, 0, 0, TH);
+  const legend = d && d.legend != null ? d.legend : k.label;
+  if (legend) {
+    const fs = Math.min(th * 0.36 * ((d && d.legendSize) || 1), 0.28 * PXU);
+    g.fillStyle = legendColor(d);
+    g.font = `600 ${Math.max(8, fs)}px Inter, "Segoe UI", "Microsoft YaHei", sans-serif`;
+    g.textAlign = "left";
+    g.textBaseline = "top";
+    const pad = Math.min(tw, th) * 0.11;
+    g.fillText(legend, tx + pad, ty + pad * 0.9);
+  }
+  const gr = g.createLinearGradient(0, ty, 0, ty + th);
   gr.addColorStop(0, "rgba(255,255,255,0.13)");
   gr.addColorStop(0.55, "rgba(255,255,255,0)");
   gr.addColorStop(1, "rgba(0,0,0,0.07)");
   g.fillStyle = gr;
-  g.fillRect(0, 0, TW, TH);
+  g.fillRect(tx, ty, tw, th);
   g.restore();
-
-  drawLegend(g, d, k, TW, TH);
-
-  roundRect(g, 0.75, 0.75, TW - 1.5, TH - 1.5, Math.max(1, r - 0.75));
-  g.strokeStyle = "rgba(255,255,255,0.28)";
-  g.lineWidth = 1.5;
-  g.stroke();
 }
 
-/* ---------- 键帽几何（三段裙边 + 锥度 + 分排倾角，带 UV） ---------- */
-function pushQuad(pos, uvs, n, a, b, c, d, uv) {
-  /* 自动修正绕向，使面法线与 n 同向；uv 为四角纹理坐标（可空） */
-  const e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-  const e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-  const cr = [
-    e1[1] * e2[2] - e1[2] * e2[1],
-    e1[2] * e2[0] - e1[0] * e2[2],
-    e1[0] * e2[1] - e1[1] * e2[0]
-  ];
-  if (cr[0] * n[0] + cr[1] * n[1] + cr[2] * n[2] < 0) {
-    [b, d] = [d, b];
-    if (uv) uv = [uv[0], uv[3], uv[2], uv[1]];
-  }
-  pos.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
-  pos.push(a[0], a[1], a[2], c[0], c[1], c[2], d[0], d[1], d[2]);
-  const U = uv || [[0, 0], [0, 0], [0, 0], [0, 0]];
-  uvs.push(U[0][0], U[0][1], U[1][0], U[1][1], U[2][0], U[2][1]);
-  uvs.push(U[0][0], U[0][1], U[2][0], U[2][1], U[3][0], U[3][1]);
-}
-
-/**
- * 键帽几何（局部坐标，Y 向上）
- * 结构：底缘(微收) → 中段裙边(近垂直) → 锥形收分 → 顶面
- * 分组：[北, 东, 南, 西, 底, 顶] → 材质数组 6 项
- */
-function capGeometry(k, params) {
+/* ---------- 键帽几何（三段裙边 + 锥度 + 分排倾角） ----------
+ * UV 直接映射到展开图画布区域：
+ *   顶面 → 顶面矩形；四壁 → 各壁条带（折叠翻转/转置在 UV 中完成）；
+ *   底面 → 画布底部色条
+ * 壁面 UV 约定：u 沿壁横向，v=0 底缘 / v=1 折缝（与顶面相邻）        */
+function capGeometry(k, params, dims) {
   const w = k.w, hh = k.h, ch = params.h, tilt = params.tilt || 0;
-  const yB = ch + Math.sin(tilt) * (hh / 2 - TI);
-  const yF = ch - Math.sin(tilt) * (hh / 2 - TI);
+  const yB = dims.yB, yF = dims.yF;
   const z1 = ch * 0.32, r1 = 0.03;
-  const pos = [], uvs = [], groups = [];
-  let start = 0;
+  const pos = [], uvs = [];
+  const S = PXU;
+  const U = px => px / dims.NW;
+  const V = py => 1 - py / (dims.NH + BP);
 
-  function quad(n, a, b, c, d, uv) { pushQuad(pos, uvs, n, a, b, c, d, uv); }
+  /* 四壁 UV：face 0北 1东 2南 3西 */
+  function wUV(face, u, v) {
+    let nx, ny;
+    if (face === 0) {          // 北：折缝在区域下缘
+      nx = (dims.ch - TI + u * dims.kw) * S;
+      ny = v * dims.yB * S;
+    } else if (face === 1) {   // 东：竖条，折缝在左缘（转置）
+      nx = (dims.ch + dims.tw + (1 - v) * dims.ch) * S;
+      ny = (dims.yB - TI + u * dims.kh) * S;
+    } else if (face === 2) {   // 南：折缝在区域上缘
+      nx = (dims.ch - TI + u * dims.kw) * S;
+      ny = (dims.yB + dims.th + (1 - v) * dims.yF) * S;
+    } else {                   // 西：竖条，折缝在右缘（反向转置闭合）
+      nx = v * dims.ch * S;
+      ny = (dims.yB - TI + (1 - u) * dims.kh) * S;
+    }
+    return [U(nx), V(ny)];
+  }
+  function tUV(x, z) {         // 顶面：后缘(z=TI)为纹理上缘
+    return [U((dims.ch + x - TI) * S), V((dims.yB + z - TI) * S)];
+  }
+  const bUV = [U(1), V(dims.NH + BP / 2)];
 
-  /* 侧面 UV：u 沿壁横向、v 按高度分段（裙边 [0, z1/H]，锥形段 [z1/H, 1]）。
-   * 方向与印刷展开图折叠一致：北/南 u 沿展开图 x（西→东），东 u 沿展开图 y（北→南），西反向闭合 */
-  /* 北（后缘，-z），壁高 yB */
+  function quad(n, a, b, c, d, ua, ub, uc, ud) {
+    /* 自动修正绕向，使面法线与 n 同向 */
+    const e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    const e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    const cr = [
+      e1[1] * e2[2] - e1[2] * e2[1],
+      e1[2] * e2[0] - e1[0] * e2[2],
+      e1[0] * e2[1] - e1[1] * e2[0]
+    ];
+    if (cr[0] * n[0] + cr[1] * n[1] + cr[2] * n[2] < 0) {
+      [b, d] = [d, b];
+      [ub, ud] = [ud, ub];
+    }
+    pos.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
+    pos.push(a[0], a[1], a[2], c[0], c[1], c[2], d[0], d[1], d[2]);
+    uvs.push(ua[0], ua[1], ub[0], ub[1], uc[0], uc[1]);
+    uvs.push(ua[0], ua[1], uc[0], uc[1], ud[0], ud[1]);
+  }
+
+  /* 北（后缘，-z）：裙边 + 锥形两段，壁高 yB */
   quad([0, 0, -1], [0, 0, 0], [w, 0, 0], [w - r1, z1, r1], [r1, z1, r1],
-       [[0, 0], [1, 0], [1 - r1 / w, z1 / yB], [r1 / w, z1 / yB]]);
+    wUV(0, 0, 0), wUV(0, 1, 0), wUV(0, 1 - r1 / w, z1 / yB), wUV(0, r1 / w, z1 / yB));
   quad([0, 0, -1], [r1, z1, r1], [w - r1, z1, r1], [w - TI, yB, TI], [TI, yB, TI],
-       [[r1 / w, z1 / yB], [1 - r1 / w, z1 / yB], [1 - TI / w, 1], [TI / w, 1]]);
-  groups.push([start, (pos.length / 3) - start, 0]); start = pos.length / 3;
+    wUV(0, r1 / w, z1 / yB), wUV(0, 1 - r1 / w, z1 / yB), wUV(0, 1 - TI / w, 1), wUV(0, TI / w, 1));
 
   /* 东（+x），壁高 ch */
   quad([1, 0, 0], [w, 0, 0], [w, 0, hh], [w - r1, z1, hh - r1], [w - r1, z1, r1],
-       [[0, 0], [1, 0], [1 - r1 / hh, z1 / ch], [r1 / hh, z1 / ch]]);
+    wUV(1, 0, 0), wUV(1, 1, 0), wUV(1, 1 - r1 / hh, z1 / ch), wUV(1, r1 / hh, z1 / ch));
   quad([1, 0, 0], [w - r1, z1, r1], [w - r1, z1, hh - r1], [w - TI, yF, hh - TI], [w - TI, yB, TI],
-       [[r1 / hh, z1 / ch], [1 - r1 / hh, z1 / ch], [1 - TI / hh, 1], [TI / hh, 1]]);
-  groups.push([start, (pos.length / 3) - start, 1]); start = pos.length / 3;
+    wUV(1, r1 / hh, z1 / ch), wUV(1, 1 - r1 / hh, z1 / ch), wUV(1, 1 - TI / hh, 1), wUV(1, TI / hh, 1));
 
   /* 南（前缘，+z），壁高 yF */
   quad([0, 0, 1], [w, 0, hh], [0, 0, hh], [r1, z1, hh - r1], [w - r1, z1, hh - r1],
-       [[1, 0], [0, 0], [r1 / w, z1 / yF], [1 - r1 / w, z1 / yF]]);
+    wUV(2, 1, 0), wUV(2, 0, 0), wUV(2, r1 / w, z1 / yF), wUV(2, 1 - r1 / w, z1 / yF));
   quad([0, 0, 1], [w - r1, z1, hh - r1], [r1, z1, hh - r1], [TI, yF, hh - TI], [w - TI, yF, hh - TI],
-       [[1 - r1 / w, z1 / yF], [r1 / w, z1 / yF], [TI / w, 1], [1 - TI / w, 1]]);
-  groups.push([start, (pos.length / 3) - start, 2]); start = pos.length / 3;
+    wUV(2, 1 - r1 / w, z1 / yF), wUV(2, r1 / w, z1 / yF), wUV(2, TI / w, 1), wUV(2, 1 - TI / w, 1));
 
   /* 西（-x），壁高 ch */
   quad([-1, 0, 0], [0, 0, hh], [0, 0, 0], [r1, z1, r1], [r1, z1, hh - r1],
-       [[0, 0], [1, 0], [1 - r1 / hh, z1 / ch], [r1 / hh, z1 / ch]]);
+    wUV(3, 0, 0), wUV(3, 1, 0), wUV(3, 1 - r1 / hh, z1 / ch), wUV(3, r1 / hh, z1 / ch));
   quad([-1, 0, 0], [r1, z1, r1], [r1, z1, hh - r1], [TI, yF, hh - TI], [TI, yB, TI],
-       [[1 - r1 / hh, z1 / ch], [r1 / hh, z1 / ch], [TI / hh, 1], [1 - TI / hh, 1]]);
-  groups.push([start, (pos.length / 3) - start, 3]); start = pos.length / 3;
+    wUV(3, r1 / hh, z1 / ch), wUV(3, 1 - r1 / hh, z1 / ch), wUV(3, 1 - TI / hh, 1), wUV(3, TI / hh, 1));
 
   /* 底面（防止低角度看穿裙边） */
-  quad([0, -1, 0], [0, 0, 0], [0, 0, hh], [w, 0, hh], [w, 0, 0]);
-  groups.push([start, (pos.length / 3) - start, 4]); start = pos.length / 3;
+  quad([0, -1, 0], [0, 0, 0], [0, 0, hh], [w, 0, hh], [w, 0, 0], bUV, bUV, bUV, bUV);
 
-  /* 顶面（UV：后缘为纹理上缘） */
+  /* 顶面 */
   quad([0, 1, 0],
     [TI, yB, TI], [w - TI, yB, TI], [w - TI, yF, hh - TI], [TI, yF, hh - TI],
-    [[0, 1], [1, 1], [1, 0], [0, 0]]);
-  groups.push([start, (pos.length / 3) - start, 5]);
+    tUV(TI, TI), tUV(w - TI, TI), tUV(w - TI, hh - TI), tUV(TI, hh - TI));
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
   geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
   geo.computeVertexNormals();
-  for (const g of groups) geo.addGroup(g[0], g[1], g[2]);
-  /* 性能：两套分组布局
-   * - groups6：[北,东,南,西,底,顶] 各自独立材质（十字包裹模式）
-   * - groups3：侧壁 4 组合并为 1 组共用纯色材质（未包裹模式 6→3 draw call） */
-  const sideStart = groups[0][0];
-  const sideCount = groups[3][0] + groups[3][1] - sideStart;
-  geo.userData.groups6 = groups.map(g => ({ start: g[0], count: g[1], materialIndex: g[2] }));
-  geo.userData.groups3 = [
-    { start: sideStart, count: sideCount, materialIndex: 0 },
-    { start: groups[4][0], count: groups[4][1], materialIndex: 4 },
-    { start: groups[5][0], count: groups[5][1], materialIndex: 5 }
-  ];
-  geo.groups = geo.userData.groups3;   // 默认未包裹布局
   return geo;
 }
 
@@ -265,13 +277,8 @@ class View {
     this.renderer.setClearColor(0xedeae3, 1);
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    /* 性能：阴影贴图只在场景几何变化时重绘（转视角不改变阴影） */
-    this.renderer.shadowMap.autoUpdate = false;
-    /* 性能：按需渲染——静止时不重绘（脏标记驱动） */
-    this._needsRender = true;
-    this.renderer.outputEncoding = THREE.sRGBEncoding;
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.12;
+    this.renderer.shadowMap.autoUpdate = false;   // 仅场景几何变化时烘焙
+    this._needsRender = true;                     // 按需渲染脏标记
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 400);
@@ -291,7 +298,6 @@ class View {
     const rim = new THREE.DirectionalLight(0xffffff, 0.5);
     rim.position.set(0, 10, -3);
     this.scene.add(amb, key, fill, rim);
-    this._keyLight = key;
     this.scene.environment = makeStudioEnv();
 
     this.keys = [];
@@ -300,24 +306,24 @@ class View {
     this.scene.add(this._group);
     this.caps = [];
     this.capMeshes = [];
-    this._stems = [];          // 轴体实例化网格（整盘 1 次 draw call/件）
+    this._stems = [];                // 轴体实例化网格（3 次 draw call）
     this._m4 = new THREE.Matrix4();
     this._plate = null;
     this._targetKey = null;
     this._targetDesign = null;
     this._singleCap = null;
+    this._singlePlate = null;
     this._raycaster = new THREE.Raycaster();
     this.selected = -1;
 
-    /* 共享几何/材质（轴体上座 + 十字轴心）：深色尼龙质感 */
+    /* 共享轴体几何/材质 */
     this._stemMat = new THREE.MeshStandardMaterial({ color: STEM, roughness: 0.5, metalness: 0.15 });
     this._housingGeo = new THREE.BoxGeometry(0.52, 0.3, 0.52);
     this._stemGeoA = new THREE.BoxGeometry(0.13, 0.09, 0.42);
     this._stemGeoB = new THREE.BoxGeometry(0.42, 0.09, 0.13);
 
     this._bindPointer();
-    /* 渲染循环必须免疫单帧异常：_frame 抛错时若不继续调度 rAF，
-     * 循环会永久死亡（画面冻结在旧帧 = 模型"卡住"） */
+    /* 渲染循环必须免疫单帧异常：抛错时仍继续调度 rAF，否则画面永久冻结 */
     const loop = () => {
       if (this.active) {
         try { this._frame(); } catch (e) { console.error("[3D] render:", e && e.message, e); }
@@ -343,14 +349,15 @@ class View {
     if (this._plate) {
       this._group.remove(this._plate);
       this._plate.geometry.dispose();
-      (Array.isArray(this._plate.material) ? this._plate.material : [this._plate.material]).forEach(m => m.dispose());
+      this._plate.material.dispose();
     }
     const pm = 0.35;
-    const pg = new THREE.BoxGeometry(bounds.W + 2 * pm, 0.42, bounds.H + 2 * pm);
-    this._plate = new THREE.Mesh(pg, new THREE.MeshStandardMaterial({
-      color: plateColor, roughness: 0.28, metalness: 0.6,
-      envMap: makeStudioEnv(), envMapIntensity: 0.85
-    }));
+    this._plate = new THREE.Mesh(
+      new THREE.BoxGeometry(bounds.W + 2 * pm, 0.42, bounds.H + 2 * pm),
+      new THREE.MeshStandardMaterial({
+        color: plateColor, roughness: 0.28, metalness: 0.6,
+        envMap: makeStudioEnv(), envMapIntensity: 0.85
+      }));
     this._plate.receiveShadow = true;
     this._plate.position.set(bounds.W / 2, -0.21, bounds.H / 2);
     this._plate.updateMatrix();
@@ -363,86 +370,30 @@ class View {
     this.renderer.shadowMap.needsUpdate = true;
   }
 
-  /* 轴体实例化：上座 + 双向十字轴心，各 1 次 draw call（原为每键 3 个网格） */
-  _buildStems(keys) {
-    const mk = (geo, y) => {
-      const im = new THREE.InstancedMesh(geo, this._stemMat, keys.length);
-      keys.forEach((k, i) => {
-        this._m4.makeTranslation(k.x + k.w / 2, y, k.y + k.h / 2);
-        im.setMatrixAt(i, this._m4);
-      });
-      im.instanceMatrix.needsUpdate = true;
-      im.instanceMatrix.setUsage(THREE.StaticDrawUsage);
-      im.matrixAutoUpdate = false;
-      im.frustumCulled = false;   // 实例包围球不含实例位移，直接禁用视锥剔除
-      this._group.add(im);
-      this._stems.push(im);
-    };
-    mk(this._housingGeo, 0.17);
-    mk(this._stemGeoA, 0.36);
-    mk(this._stemGeoB, 0.36);
-  }
-
-  _clearStems() {
-    for (const im of this._stems) {
-      this._group.remove(im);
-      im.dispose();               // 仅释放实例矩阵缓冲，几何/材质为共享资源
-    }
-    this._stems = [];
-  }
-
+  /* ----- 键帽构建：1 几何 + 1 材质 + 1 纹理 ----- */
   _buildCap(k, d, index, px, py, single, rowParams) {
     const rowP = rowParams || keycapProfileFor(k, this._hasFRow, this.profile);
-    const bg0 = (d && d.bg) || "#e9ecf5";
-    /* 键帽材质：ABS 塑料（Standard PBR，无清漆层——clearcoat 是最贵的片元特性） */
-    const env = makeStudioEnv();
-    const sideMats = [0, 1, 2, 3].map(() => new THREE.MeshStandardMaterial({
-      color: 0xffffff, roughness: 0.4, metalness: 0.05,
-      envMap: env, envMapIntensity: 0.5
-    }));
-    /* 纹理画布按最终尺寸一次性分配，之后绝不 resize——
-     * 带纹理的画布反复 resize 会触发 WebGL 上传越界（贴图残留/错乱的元凶） */
-    const texCanvas = document.createElement("canvas");
-    texCanvas.width = Math.round((k.w - 2 * TI) * PXS);
-    texCanvas.height = Math.round(rowP.h * PXS);
-    if (d) drawTopCanvas(texCanvas, k, d, this.getImg);
-    const tex = makeCapTexture(texCanvas);
-    tex.anisotropy = 8;
-    const topMat = new THREE.MeshStandardMaterial({
+    const dims = netDims(k, rowP);
+
+    const canvas = document.createElement("canvas");
+    canvas.width = dims.NW; canvas.height = dims.NH + BP;
+    drawNetCanvas(canvas, dims, d, k, this.getImg);
+
+    const tex = makeCapTexture(canvas);
+    /* 单材质：顶面/四壁共用展开图纹理；透明用于顶面圆角 */
+    const mat = new THREE.MeshStandardMaterial({
       map: tex, transparent: true, roughness: 0.35, metalness: 0.05,
-      envMap: env, envMapIntensity: 0.6
+      envMap: makeStudioEnv(), envMapIntensity: 0.6
     });
-    const bottomMat = new THREE.MeshStandardMaterial({ color: Render.shade(bg0, -58), roughness: 0.6, metalness: 0.05 });
 
-    /* 十字展开包裹：每侧面一张裁剪纹理 + 展开图画布（尺寸同样一次分配） */
-    const yBpx = Math.round((rowP.h + Math.sin(rowP.tilt || 0) * (k.h / 2 - TI)) * PXS);
-    const yFpx = Math.round((rowP.h - Math.sin(rowP.tilt || 0) * (k.h / 2 - TI)) * PXS);
-    const sideTexs = [
-      [Math.round(k.w * PXS), yBpx],
-      [Math.round(k.h * PXS), Math.round(rowP.h * PXS)],
-      [Math.round(k.w * PXS), yFpx],
-      [Math.round(k.h * PXS), Math.round(rowP.h * PXS)]
-    ].map(([w, h]) => {
-      const cv = document.createElement("canvas");
-      cv.width = w; cv.height = h;
-      return makeCapTexture(cv);
-    });
-    const netCanvas = document.createElement("canvas");
-    netCanvas.width = Math.round((rowP.h * 2 + (k.w - 2 * TI)) * PXS);
-    netCanvas.height = Math.round((yBpx / PXS + (k.w - 2 * TI) + yFpx / PXS) * PXS);
-
-    const geoU = { groups6: null, groups3: null };
-    const mesh = new THREE.Mesh(capGeometry(k, rowP), [...sideMats, bottomMat, topMat]);
-    geoU.groups6 = mesh.geometry.userData.groups6;
-    geoU.groups3 = mesh.geometry.userData.groups3;
+    const mesh = new THREE.Mesh(capGeometry(k, rowP, dims), mat);
     mesh.position.set(px, FLOAT, py);
     mesh.updateMatrix();
-    mesh.matrixAutoUpdate = false;   // 静态物件：冻结世界矩阵，省每帧矩阵计算
+    mesh.matrixAutoUpdate = false;   // 静态物件：冻结世界矩阵
     mesh.userData.index = single ? -1 : index;
     this._group.add(mesh);
 
-    /* 轴体上座 + 十字轴心：整盘模式用 InstancedMesh 统一绘制（见 setScene），
-     * 仅单键模式创建独立网格 */
+    /* 轴体上座 + 十字轴心：仅单键模式独立创建（整盘走 InstancedMesh） */
     let housing = null, stemA = null, stemB = null;
     if (single) {
       housing = new THREE.Mesh(this._housingGeo, this._stemMat);
@@ -454,10 +405,12 @@ class View {
       this._group.add(housing, stemA, stemB);
     }
 
-    const cap = { mesh, sideMats, bottomMat, topMat, tex, texCanvas, sideTexs, netCanvas,
-                  groups6: geoU.groups6, groups3: geoU.groups3,
-                  v: d ? d.v : -1, wrapState: null, index, k, ch: rowP.h, tilt: rowP.tilt || 0,
-                  housing, stemA, stemB };
+    const cap = {
+      mesh, mat, tex, canvas, dims, k, index,
+      d: d || null,
+      v: -1, wrapState: null,        // 纹理内容版本 / 包裹状态
+      housing, stemA, stemB
+    };
     this.caps.push(cap);
     this.capMeshes.push(mesh);
     if (single) {
@@ -468,9 +421,37 @@ class View {
     return cap;
   }
 
+  /* 轴体实例化：上座 + 双向十字轴心，各 1 次 draw call */
+  _buildStems(keys) {
+    const mk = (geo, y) => {
+      const im = new THREE.InstancedMesh(geo, this._stemMat, keys.length);
+      keys.forEach((k, i) => {
+        this._m4.makeTranslation(k.x + k.w / 2, y, k.y + k.h / 2);
+        im.setMatrixAt(i, this._m4);
+      });
+      im.instanceMatrix.needsUpdate = true;
+      im.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+      im.matrixAutoUpdate = false;
+      im.frustumCulled = false;      // 实例包围球不含实例位移
+      this._group.add(im);
+      this._stems.push(im);
+    };
+    mk(this._housingGeo, 0.17);
+    mk(this._stemGeoA, 0.36);
+    mk(this._stemGeoB, 0.36);
+  }
+
+  _clearStems() {
+    for (const im of this._stems) {
+      this._group.remove(im);
+      im.dispose();                  // 仅释放实例矩阵缓冲（几何/材质共享）
+    }
+    this._stems = [];
+  }
+
   setPlateColor(c) {
     this.plateColor = c;
-    this._applyPlate();
+    if (this._plate) this._plate.material.color.set(c);
     this._needsRender = true;
   }
 
@@ -480,39 +461,21 @@ class View {
     this._needsRender = true;
   }
 
-  _applyPlate() {
-    if (!this._plate) return;
-    this._plate.material.color.set(this.plateColor);
-  }
-
   setSelected(i) {
     this.selected = i;
-    this._applyCapColors();
+    this._applyTint();
     this._needsRender = true;
   }
 
-  _applyCapColors() {
-    const apply = (c, d) => {
-      if (!d) return;
-      const sel = c.index === this.selected;
-      const wrapped = !!c.sideMats[0].map;
-      const bg = d.bg || "#e9ecf5";
-      if (wrapped) {
-        /* 包裹模式下明暗由灯光驱动，材质色仅用于选中高亮 */
-        SIDE_BLEND.forEach((b, j) => {
-          c.sideMats[j].color.set(sel ? 0xd9480f : 0xffffff);
-        });
-      } else {
-        /* 未包裹布局：只有合并侧壁材质（索引 0）参与绘制 */
-        const base = new THREE.Color(bg);
-        if (sel) base.lerp(ACCENT, SIDE_BLEND[0]);
-        c.sideMats[0].color.copy(base);
-      }
-      /* 同步侧面底色缓存：选中态由本函数负责，刷新循环不重复写入 */
-      c._bgApplied = sel ? "sel:" + bg : bg;
+  /* 选中高亮：整帽向强调色着色（材质色与纹理相乘） */
+  _applyTint() {
+    const apply = c => {
+      const sel = !this.single && c.index === this.selected;
+      c.mat.color.set(0xffffff);
+      if (sel) c.mat.color.lerp(ACCENT, 0.45);
     };
-    for (const c of this.caps) apply(c, this.designs[c.index]);
-    if (this._singleCap && this._singleCap.d) apply(this._singleCap, this._singleCap.d);
+    for (const c of this.caps) apply(c);
+    if (this._singleCap) apply(this._singleCap);
   }
 
   setActive(a) { this.active = !!a; }
@@ -521,32 +484,29 @@ class View {
   setTarget(k, d, rowParams) {
     this._targetKey = k;
     this._targetDesign = d;
-    if (this._singleCap) {
-      this._removeCap(this._singleCap);
-      this._singleCap = null;
-    }
+    if (this._singleCap) { this._removeCap(this._singleCap); this._singleCap = null; }
     if (this._singlePlate) {
       this.scene.remove(this._singlePlate);
       this._singlePlate.geometry.dispose();
-      (Array.isArray(this._singlePlate.material) ? this._singlePlate.material : [this._singlePlate.material]).forEach(m => m.dispose());
+      this._singlePlate.material.dispose();
       this._singlePlate = null;
     }
     if (!k) return;
 
-    /* 小底板：铝质定位板（接收阴影） */
     const pm = 0.55;
-    const pg = new THREE.BoxGeometry(k.w + 2 * pm, 0.42, k.h + 2 * pm);
-    this._singlePlate = new THREE.Mesh(pg, new THREE.MeshStandardMaterial({
-      color: this.plateColor, roughness: 0.28, metalness: 0.6,
-      envMap: makeStudioEnv(), envMapIntensity: 0.85
-    }));
+    this._singlePlate = new THREE.Mesh(
+      new THREE.BoxGeometry(k.w + 2 * pm, 0.42, k.h + 2 * pm),
+      new THREE.MeshStandardMaterial({
+        color: this.plateColor, roughness: 0.28, metalness: 0.6,
+        envMap: makeStudioEnv(), envMapIntensity: 0.85
+      }));
     this._singlePlate.receiveShadow = true;
     this._singlePlate.position.set(k.w / 2, -0.21, k.h / 2);
+    this._singlePlate.updateMatrix();
+    this._singlePlate.matrixAutoUpdate = false;
     this.scene.add(this._singlePlate);
 
     this._singleCap = this._buildCap(k, d, 0, 0, 0, true, rowParams);
-    this._singleCap.d = d;
-    this._singleCap.k = k;
     this._needsRender = true;
     this.renderer.shadowMap.needsUpdate = true;
   }
@@ -554,30 +514,18 @@ class View {
   _removeCap(c) {
     this._group.remove(c.mesh);
     c.mesh.geometry.dispose();
-    c.sideMats.forEach(m => m.dispose());
-    c.bottomMat.dispose();
-    c.topMat.dispose();
+    c.mat.dispose();
     c.tex.dispose();
-    c.sideTexs.forEach(t => t.dispose());
     [c.housing, c.stemA, c.stemB].forEach(m => { if (m) this._group.remove(m); });
   }
 
   _clearCaps() {
-    for (const c of this.caps) {
-      this._group.remove(c.mesh);
-      c.mesh.geometry.dispose();
-      c.sideMats.forEach(m => m.dispose());
-      c.bottomMat.dispose();
-      c.topMat.dispose();
-      c.tex.dispose();
-      c.sideTexs.forEach(t => t.dispose());
-      [c.housing, c.stemA, c.stemB].forEach(m => { if (m) this._group.remove(m); });
-    }
+    for (const c of this.caps) this._removeCap(c);
     this.caps = [];
     this.capMeshes = [];
   }
 
-  /* ----- 纹理 / 颜色刷新（每帧按需；返回本帧是否有变更需要重绘） ----- */
+  /* ----- 纹理刷新（每帧按需；返回是否有变更） ----- */
   _refreshCaps() {
     let changed = false;
     if (this.single) {
@@ -588,10 +536,9 @@ class View {
         if (this._refreshOne(c)) changed = true;
       }
     }
-
-    const hex = this._plate && this._plate.material.color.getHexString();
-    if (hex && hex !== this.plateColor.replace("#", "").toLowerCase()) {
-      this._applyPlate();
+    if (this._plate && this._plate.material.color.getHexString() !==
+        this.plateColor.replace("#", "").toLowerCase()) {
+      this._plate.material.color.set(this.plateColor);
       changed = true;
     }
     return changed;
@@ -601,184 +548,44 @@ class View {
     const d = c.d;
     if (!d) return false;
     const img = d.img ? this.getImg(d.img.data) : null;
-    const imgOk = img && img.complete && img.naturalWidth > 0;
-    const imgPending = d.img && !imgOk;
-    const wrap = !!(d.img && d.img.wrap === "net") && imgOk;
-    /* 新图加载中：保持当前包裹画面不变，避免中途回退成仅顶面 */
-    if (imgPending && c.wrapState) return false;
+    /* 图片加载中：保持当前画面，加载完成后的帧自动重绘 */
+    if (d.img && !(img && img.complete && img.naturalWidth > 0)) return false;
+
     let changed = false;
-    if (d.v !== c.v || imgPending || wrap !== c.wrapState) {
-      if (wrap) this._applyWrapNet(c, d, img);
-      else {
-        drawTopCanvas(c.texCanvas, c.k, d, this.getImg);
+    if (d.v !== c.v) {
+      drawNetCanvas(c.canvas, c.dims, d, c.k, this.getImg);
+      const wrapNet = !!(d.img && d.img.wrap === "net");
+      if (wrapNet !== c.wrapState) {
+        /* 切换包裹状态时换新纹理对象：规避个别环境对同一 CanvasTexture
+         * 反复上传时的 GPU 残留（旧帧叠加） */
+        c.tex.dispose();
+        c.tex = makeCapTexture(c.canvas);
+        c.mat.map = c.tex;
+        c.mat.needsUpdate = true;
+      } else {
         c.tex.needsUpdate = true;
-        this._clearSideWrap(c, d);
       }
-      if (!imgPending) { c.v = d.v; c.wrapState = wrap; }
+      c.v = d.v;
+      c.wrapState = wrapNet;
       changed = true;
-    }
-    if (!wrap) {
-      /* 侧面底色：仅在实际变化时写入材质（避免每帧 uniform 上传）；
-       * 未包裹布局下只有合并侧壁材质（索引 0）参与绘制 */
-      const bg = d.bg || "#e9ecf5";
-      if (c._bgApplied !== bg) {
-        c.sideMats[0].color.set(bg);
-        c._bgApplied = bg;
-        changed = true;
-      }
     }
     return changed;
   }
 
-  /* ----- 十字展开取模：按真实展开尺寸取样（与取模预览完全一致）
-   * 展开图布局：北壁 | 西壁 · 顶面(tw×th) · 东壁 | 南壁
-   * 顶面取样 tw×th（真实顶面），四壁按分排高度 yB/yF/ch 取样 ----- */
-  _applyWrapNet(c, d, img) {
-    /* 重建纹理对象：同一 CanvasTexture 反复更新后，部分环境的 GPU 上传会
-     * 残留旧内容（重复标志 / 旧帧叠加 = "图中图"），每次应用换新对象根治 */
-    if (c.mesh.geometry.groups !== c.groups6) c.mesh.geometry.groups = c.groups6;
-    c.tex.dispose();
-    c.tex = makeCapTexture(c.texCanvas);
-    c.topMat.map = c.tex;
-    c.topMat.needsUpdate = true;
-    c.sideTexs.forEach((t, j) => {
-      t.dispose();
-      c.sideTexs[j] = makeCapTexture(t.image);
-      c.sideMats[j].map = c.sideTexs[j];
-      c.sideMats[j].needsUpdate = true;
-    });
-    const k = c.k, PX = PXS;
-    const tw = k.w - 2 * TI, th = k.h - 2 * TI;
-    const tilt = c.tilt || 0;
-    const chH = c.ch || 0.55;
-    const yB = chH + Math.sin(tilt) * (k.h / 2 - TI);
-    const yF = chH - Math.sin(tilt) * (k.h / 2 - TI);
-
-    const netW = chH + tw + chH;  /* 西壁竖条 | 顶面 | 东壁竖条（壁条宽=壁高，高=键深） */
-    const netH = yB + th + yF;    /* 北壁 | 顶面 | 南壁 */
-    const NW = Math.max(8, Math.round(netW * PX));
-    const NH = Math.max(8, Math.round(netH * PX));
-    const net = c.netCanvas;
-    if (net.width !== NW || net.height !== NH) { net.width = NW; net.height = NH; }
-    const g = net.getContext("2d");
-    g.clearRect(0, 0, NW, NH);
-    /* 底色填充：图片未覆盖区域显示键帽底色（不透明） */
-    g.fillStyle = (d && d.bg) || "#e9ecf5";
-    g.fillRect(0, 0, NW, NH);
-
-    /* 各面取样条带（真实展开：北/南横条，东/西竖条，折叠线处图案连续） */
-    const topR = { x: chH * PX, y: yB * PX, w: tw * PX, h: th * PX };
-    const sideR = [
-      { x: (chH - TI) * PX, y: 0, w: k.w * PX, h: yB * PX, m: "n" },                // 北壁
-      { x: (chH + tw) * PX, y: (yB - TI) * PX, w: chH * PX, h: k.h * PX, m: "e" },  // 东壁竖条
-      { x: (chH - TI) * PX, y: (yB + th) * PX, w: k.w * PX, h: yF * PX, m: "s" },   // 南壁
-      { x: 0, y: (yB - TI) * PX, w: chH * PX, h: k.h * PX, m: "w" }                 // 西壁竖条
-    ];
-    c.netLayout = { px: PX, ch: chH * PX, kh: k.h * PX, topX: topR.x, topY: topR.y, topW: topR.w, topH: topR.h };
-
-    /* 原始比例放置 × 缩放/偏移/旋转可调，绝不拉伸变形：
-     * fit=contain 完整放入模板（默认）；fit=cover 铺满模板（裁掉超出部分） */
-    /* 原始比例放置 × 缩放/偏移/旋转可调，绝不拉伸变形：
-     * 铺满顶面区域（与仅顶面画面一致），余出部分包四壁 */
-    const s = Math.max(topR.w / img.naturalWidth, topR.h / img.naturalHeight) * ((d && d.img && d.img.scale) || 1);
-    g.save();
-    g.translate(topR.x + topR.w / 2 + ((d && d.img && d.img.ox) || 0) * topR.w,
-                topR.y + topR.h / 2 + ((d && d.img && d.img.oy) || 0) * topR.h);
-    g.rotate(((d && d.img && d.img.rot) || 0) * Math.PI / 180);
-    g.drawImage(img, -img.naturalWidth * s / 2, -img.naturalHeight * s / 2,
-                img.naturalWidth * s, img.naturalHeight * s);
-    g.restore();
-
-    /* 顶面区域 → 顶面纹理（真实顶面尺寸 tw × th） */
-    if (c.texCanvas.width !== topR.w || c.texCanvas.height !== topR.h) {
-      c.texCanvas.width = topR.w; c.texCanvas.height = topR.h;
-    }
-    const gt = c.texCanvas.getContext("2d");
-    gt.clearRect(0, 0, topR.w, topR.h);
-    gt.drawImage(net, topR.x, topR.y, topR.w, topR.h, 0, 0, topR.w, topR.h);
-
-    /* 图例印在展开图的顶面区域（随包裹出现在键帽顶面） */
-    const legend = d && d.legend != null ? d.legend : k.label;
-    if (legend) {
-      const bg = d.bg || "#e9ecf5";
-      const color = (d && d.legendColor) || (Render.luminance(bg) > 0.55 ? "#3a3d46" : "#e8eaf2");
-      const fs = Math.min(topR.h * 0.36 * ((d && d.legendSize) || 1), 0.28 * PXU);
-      gt.fillStyle = color;
-      gt.font = `600 ${Math.max(8, fs)}px Inter, "Segoe UI", "Microsoft YaHei", sans-serif`;
-      gt.textAlign = "left";
-      gt.textBaseline = "top";
-      const pad = Math.min(topR.w, topR.h) * 0.11;
-      gt.fillText(legend, pad, pad * 0.9);
-    }
-
-    /* 顶面光影 */
-    gt.save();
-    roundRect(gt, 0, 0, topR.w, topR.h, 0.10 * PXU);
-    gt.clip();
-    const gr = gt.createLinearGradient(0, 0, 0, topR.h);
-    gr.addColorStop(0, "rgba(255,255,255,0.13)");
-    gr.addColorStop(0.55, "rgba(255,255,255,0)");
-    gr.addColorStop(1, "rgba(0,0,0,0.07)");
-    gt.fillStyle = gr;
-    gt.fillRect(0, 0, topR.w, topR.h);
-    gt.restore();
-
-    c.tex.needsUpdate = true;
-
-    /* 四壁区域 → 侧面纹理（折叠刚体变换：北壁竖直翻转，东/西壁转置铺平） */
-    sideR.forEach((r, j) => {
-      const cv = c.sideTexs[j].image;
-      const tp = r.m === "e" || r.m === "w";
-      const rw = Math.max(4, Math.round(tp ? r.h : r.w));
-      const rh = Math.max(4, Math.round(tp ? r.w : r.h));
-      if (cv.width !== rw || cv.height !== rh) { cv.width = rw; cv.height = rh; }
-      const gg = cv.getContext("2d");
-      gg.clearRect(0, 0, rw, rh);
-      gg.save();
-      if (r.m === "n") {
-        gg.translate(0, rh); gg.scale(1, -1);          // 折痕在下缘 → 接缝翻到纹理上缘
-        gg.drawImage(net, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
-      } else if (r.m === "s") {
-        gg.drawImage(net, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
-      } else if (r.m === "e") {
-        gg.transform(0, 1, 1, 0, 0, 0);                // 竖条转置：折痕(左缘)→纹理上缘
-        gg.drawImage(net, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
-      } else {
-        gg.transform(0, -1, -1, 0, rw, rh);            // 西条：折痕(右缘)→纹理上缘
-        gg.drawImage(net, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
-      }
-      gg.restore();
-      /* 明暗由灯光驱动（PBR），不在贴图中烘焙 */
-      c.sideTexs[j].needsUpdate = true;
-      if (c.sideMats[j].map !== c.sideTexs[j]) {
-        c.sideMats[j].map = c.sideTexs[j];
-        c.sideMats[j].needsUpdate = true;
-      }
-      c.sideMats[j].color.set(0xffffff);
-    });
-  }
-
-  _clearSideWrap(c, d) {
-    if (c.mesh.geometry.groups !== c.groups3) c.mesh.geometry.groups = c.groups3;
-    c.sideMats.forEach((m, j) => {
-      if (m.map) { m.map = null; m.needsUpdate = true; }
-      m.color.set((d && d.bg) || "#e9ecf5");
-    });
-    c.wrapState = false;
-  }
-
-  /* ----- 取模预览：返回当前键帽的十字展开图与布局 ----- */
+  /* ----- 取模预览：当前键帽的十字展开图与布局 ----- */
   getNetCanvas() {
     const c = this.single ? this._singleCap : this.caps[this.selected];
-    return (c && c.netCanvas && c.netCanvas.width > 8) ? c.netCanvas : null;
+    return (c && c.canvas.width > 8) ? c.canvas : null;
   }
 
   getNetLayout() {
     const c = this.single ? this._singleCap : this.caps[this.selected];
-    return (c && c.netLayout) ? c.netLayout : null;
+    if (!c) return null;
+    const { ch, yB, tw, th } = c.dims;
+    return { px: PXU, ch: ch * PXU, kh: c.k.h * PXU, topX: ch * PXU, topY: yB * PXU, topW: tw * PXU, topH: th * PXU };
   }
 
-  /* 像素比上限 1.75：4K/高 DPI 下填充率减半，肉眼无感差异 */
+  /* 像素比上限 1.75：高 DPI 下填充率减半，肉眼无感差异 */
   _dpr() {
     return Math.min(window.devicePixelRatio || 1, 1.75);
   }
@@ -825,10 +632,10 @@ class View {
     if (spinning) { this.orbit.yaw += 0.006; this._needsRender = true; }
     if (this._refreshCaps()) { this._needsRender = true; contentDirty = true; }
     if (this._updateCamera()) { this._needsRender = true; contentDirty = true; }
-    /* 按需渲染：静止帧直接跳过，画面保持上一帧内容 */
-    if (!this._needsRender) return;
-    /* 仅自动旋转产生的脏帧：限流 ~25fps，内容变更仍即时渲染 */
-    if (!contentDirty && performance.now() - (this._lastSpinRender || 0) < 40) return;
+    if (!this._needsRender) return;            // 静止帧：跳过渲染
+    if (!contentDirty && performance.now() - (this._lastSpinRender || 0) < 40) {
+      return;                                  // 仅自动旋转的脏帧限流 ~25fps
+    }
     this._needsRender = false;
     if (!contentDirty) this._lastSpinRender = performance.now();
     this.renderer.render(this.scene, this.camera);
@@ -891,7 +698,6 @@ class View {
   /* ----- 高清导出 ----- */
   snapshot(scale = 2) {
     const w = this.canvas.clientWidth, h = this.canvas.clientHeight;
-    const dpr = window.devicePixelRatio || 1;
     this.renderer.setPixelRatio(1);
     this.renderer.setSize(w * scale, h * scale, false);
     this.camera.aspect = w / h;
