@@ -227,6 +227,18 @@ function capGeometry(k, params) {
   geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
   geo.computeVertexNormals();
   for (const g of groups) geo.addGroup(g[0], g[1], g[2]);
+  /* 性能：两套分组布局
+   * - groups6：[北,东,南,西,底,顶] 各自独立材质（十字包裹模式）
+   * - groups3：侧壁 4 组合并为 1 组共用纯色材质（未包裹模式 6→3 draw call） */
+  const sideStart = groups[0][0];
+  const sideCount = groups[3][0] + groups[3][1] - sideStart;
+  geo.userData.groups6 = groups.map(g => ({ start: g[0], count: g[1], materialIndex: g[2] }));
+  geo.userData.groups3 = [
+    { start: sideStart, count: sideCount, materialIndex: 0 },
+    { start: groups[4][0], count: groups[4][1], materialIndex: 4 },
+    { start: groups[5][0], count: groups[5][1], materialIndex: 5 }
+  ];
+  geo.groups = geo.userData.groups3;   // 默认未包裹布局
   return geo;
 }
 
@@ -248,11 +260,15 @@ class View {
     this.orbit = { yaw: 0.55, elev: 0.88, zoom: 1 };
 
     this.renderer = new THREE.WebGLRenderer({
-      canvas, antialias: true, alpha: false, preserveDrawingBuffer: true
+      canvas, antialias: true, alpha: false
     });
     this.renderer.setClearColor(0xedeae3, 1);
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    /* 性能：阴影贴图只在场景几何变化时重绘（转视角不改变阴影） */
+    this.renderer.shadowMap.autoUpdate = false;
+    /* 性能：按需渲染——静止时不重绘（脏标记驱动） */
+    this._needsRender = true;
     this.renderer.outputEncoding = THREE.sRGBEncoding;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.12;
@@ -284,6 +300,8 @@ class View {
     this.scene.add(this._group);
     this.caps = [];
     this.capMeshes = [];
+    this._stems = [];          // 轴体实例化网格（整盘 1 次 draw call/件）
+    this._m4 = new THREE.Matrix4();
     this._plate = null;
     this._targetKey = null;
     this._targetDesign = null;
@@ -312,6 +330,7 @@ class View {
   /* ----- 场景构建 ----- */
   setScene(keys, designs, plateColor, profile) {
     this._clearCaps();
+    this._clearStems();
     this.keys = keys;
     this.designs = designs;
     this.plateColor = plateColor;
@@ -334,20 +353,52 @@ class View {
     }));
     this._plate.receiveShadow = true;
     this._plate.position.set(bounds.W / 2, -0.21, bounds.H / 2);
+    this._plate.updateMatrix();
+    this._plate.matrixAutoUpdate = false;
     this._group.add(this._plate);
 
     keys.forEach((k, i) => this._buildCap(k, designs[i], i, k.x, k.y, false));
+    this._buildStems(keys);
+    this._needsRender = true;
+    this.renderer.shadowMap.needsUpdate = true;
+  }
+
+  /* 轴体实例化：上座 + 双向十字轴心，各 1 次 draw call（原为每键 3 个网格） */
+  _buildStems(keys) {
+    const mk = (geo, y) => {
+      const im = new THREE.InstancedMesh(geo, this._stemMat, keys.length);
+      keys.forEach((k, i) => {
+        this._m4.makeTranslation(k.x + k.w / 2, y, k.y + k.h / 2);
+        im.setMatrixAt(i, this._m4);
+      });
+      im.instanceMatrix.needsUpdate = true;
+      im.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+      im.matrixAutoUpdate = false;
+      im.frustumCulled = false;   // 实例包围球不含实例位移，直接禁用视锥剔除
+      this._group.add(im);
+      this._stems.push(im);
+    };
+    mk(this._housingGeo, 0.17);
+    mk(this._stemGeoA, 0.36);
+    mk(this._stemGeoB, 0.36);
+  }
+
+  _clearStems() {
+    for (const im of this._stems) {
+      this._group.remove(im);
+      im.dispose();               // 仅释放实例矩阵缓冲，几何/材质为共享资源
+    }
+    this._stems = [];
   }
 
   _buildCap(k, d, index, px, py, single, rowParams) {
     const rowP = rowParams || keycapProfileFor(k, this._hasFRow, this.profile);
     const bg0 = (d && d.bg) || "#e9ecf5";
-    /* 键帽材质：ABS 塑料（清漆层 + 低粗糙度），颜色由贴图/灯光驱动 */
+    /* 键帽材质：ABS 塑料（Standard PBR，无清漆层——clearcoat 是最贵的片元特性） */
     const env = makeStudioEnv();
-    const sideMats = [0, 1, 2, 3].map(() => new THREE.MeshPhysicalMaterial({
-      color: 0xffffff, roughness: 0.34, metalness: 0.0,
-      clearcoat: 0.5, clearcoatRoughness: 0.28,
-      envMap: env, envMapIntensity: 0.75
+    const sideMats = [0, 1, 2, 3].map(() => new THREE.MeshStandardMaterial({
+      color: 0xffffff, roughness: 0.4, metalness: 0.05,
+      envMap: env, envMapIntensity: 0.5
     }));
     /* 纹理画布按最终尺寸一次性分配，之后绝不 resize——
      * 带纹理的画布反复 resize 会触发 WebGL 上传越界（贴图残留/错乱的元凶） */
@@ -357,10 +408,9 @@ class View {
     if (d) drawTopCanvas(texCanvas, k, d, this.getImg);
     const tex = makeCapTexture(texCanvas);
     tex.anisotropy = 8;
-    const topMat = new THREE.MeshPhysicalMaterial({
-      map: tex, transparent: true, roughness: 0.32, metalness: 0.0,
-      clearcoat: 0.55, clearcoatRoughness: 0.22,
-      envMap: env, envMapIntensity: 0.85
+    const topMat = new THREE.MeshStandardMaterial({
+      map: tex, transparent: true, roughness: 0.35, metalness: 0.05,
+      envMap: env, envMapIntensity: 0.6
     });
     const bottomMat = new THREE.MeshStandardMaterial({ color: Render.shade(bg0, -58), roughness: 0.6, metalness: 0.05 });
 
@@ -381,21 +431,31 @@ class View {
     netCanvas.width = Math.round((rowP.h * 2 + (k.w - 2 * TI)) * PXS);
     netCanvas.height = Math.round((yBpx / PXS + (k.w - 2 * TI) + yFpx / PXS) * PXS);
 
+    const geoU = { groups6: null, groups3: null };
     const mesh = new THREE.Mesh(capGeometry(k, rowP), [...sideMats, bottomMat, topMat]);
+    geoU.groups6 = mesh.geometry.userData.groups6;
+    geoU.groups3 = mesh.geometry.userData.groups3;
     mesh.position.set(px, FLOAT, py);
+    mesh.updateMatrix();
+    mesh.matrixAutoUpdate = false;   // 静态物件：冻结世界矩阵，省每帧矩阵计算
     mesh.userData.index = single ? -1 : index;
     this._group.add(mesh);
 
-    /* 轴体上座 + 十字轴心（键帽悬浮露出） */
-    const housing = new THREE.Mesh(this._housingGeo, this._stemMat);
-    housing.position.set(px + k.w / 2, 0.17, py + k.h / 2);
-    const stemA = new THREE.Mesh(this._stemGeoA, this._stemMat);
-    stemA.position.set(px + k.w / 2, 0.36, py + k.h / 2);
-    const stemB = new THREE.Mesh(this._stemGeoB, this._stemMat);
-    stemB.position.set(px + k.w / 2, 0.36, py + k.h / 2);
-    this._group.add(housing, stemA, stemB);
+    /* 轴体上座 + 十字轴心：整盘模式用 InstancedMesh 统一绘制（见 setScene），
+     * 仅单键模式创建独立网格 */
+    let housing = null, stemA = null, stemB = null;
+    if (single) {
+      housing = new THREE.Mesh(this._housingGeo, this._stemMat);
+      housing.position.set(px + k.w / 2, 0.17, py + k.h / 2);
+      stemA = new THREE.Mesh(this._stemGeoA, this._stemMat);
+      stemA.position.set(px + k.w / 2, 0.36, py + k.h / 2);
+      stemB = new THREE.Mesh(this._stemGeoB, this._stemMat);
+      stemB.position.set(px + k.w / 2, 0.36, py + k.h / 2);
+      this._group.add(housing, stemA, stemB);
+    }
 
     const cap = { mesh, sideMats, bottomMat, topMat, tex, texCanvas, sideTexs, netCanvas,
+                  groups6: geoU.groups6, groups3: geoU.groups3,
                   v: d ? d.v : -1, wrapState: null, index, k, ch: rowP.h, tilt: rowP.tilt || 0,
                   housing, stemA, stemB };
     this.caps.push(cap);
@@ -411,6 +471,13 @@ class View {
   setPlateColor(c) {
     this.plateColor = c;
     this._applyPlate();
+    this._needsRender = true;
+  }
+
+  /* 视口背景色（跟随界面主题） */
+  setClearColor(c) {
+    this.renderer.setClearColor(new THREE.Color(c), 1);
+    this._needsRender = true;
   }
 
   _applyPlate() {
@@ -421,6 +488,7 @@ class View {
   setSelected(i) {
     this.selected = i;
     this._applyCapColors();
+    this._needsRender = true;
   }
 
   _applyCapColors() {
@@ -428,16 +496,20 @@ class View {
       if (!d) return;
       const sel = c.index === this.selected;
       const wrapped = !!c.sideMats[0].map;
-      SIDE_BLEND.forEach((b, j) => {
-        if (wrapped) {
-          /* 包裹模式下明暗由灯光驱动，材质色仅用于选中高亮 */
+      const bg = d.bg || "#e9ecf5";
+      if (wrapped) {
+        /* 包裹模式下明暗由灯光驱动，材质色仅用于选中高亮 */
+        SIDE_BLEND.forEach((b, j) => {
           c.sideMats[j].color.set(sel ? 0xd9480f : 0xffffff);
-        } else {
-          const base = new THREE.Color(d.bg || "#e9ecf5");
-          if (sel) base.lerp(ACCENT, SIDE_BLEND[j]);
-          c.sideMats[j].color.copy(base);
-        }
-      });
+        });
+      } else {
+        /* 未包裹布局：只有合并侧壁材质（索引 0）参与绘制 */
+        const base = new THREE.Color(bg);
+        if (sel) base.lerp(ACCENT, SIDE_BLEND[0]);
+        c.sideMats[0].color.copy(base);
+      }
+      /* 同步侧面底色缓存：选中态由本函数负责，刷新循环不重复写入 */
+      c._bgApplied = sel ? "sel:" + bg : bg;
     };
     for (const c of this.caps) apply(c, this.designs[c.index]);
     if (this._singleCap && this._singleCap.d) apply(this._singleCap, this._singleCap.d);
@@ -475,6 +547,8 @@ class View {
     this._singleCap = this._buildCap(k, d, 0, 0, 0, true, rowParams);
     this._singleCap.d = d;
     this._singleCap.k = k;
+    this._needsRender = true;
+    this.renderer.shadowMap.needsUpdate = true;
   }
 
   _removeCap(c) {
@@ -503,38 +577,57 @@ class View {
     this.capMeshes = [];
   }
 
-  /* ----- 纹理 / 颜色刷新（每帧按需） ----- */
+  /* ----- 纹理 / 颜色刷新（每帧按需；返回本帧是否有变更需要重绘） ----- */
   _refreshCaps() {
-    const list = this.single
-      ? (this._singleCap ? [this._singleCap] : [])
-      : this.caps.map(c => { c.d = this.designs[c.index]; return c; });
-
-    for (const c of list) {
-      const d = c.d;
-      if (!d) continue;
-      const img = d.img ? this.getImg(d.img.data) : null;
-      const imgOk = img && img.complete && img.naturalWidth > 0;
-      const imgPending = d.img && !imgOk;
-      const wrap = !!(d.img && d.img.wrap === "net") && imgOk;
-      /* 新图加载中：保持当前包裹画面不变，避免中途回退成仅顶面 */
-      if (imgPending && c.wrapState) continue;
-      if (d.v !== c.v || imgPending || wrap !== c.wrapState) {
-        if (wrap) this._applyWrapNet(c, d, img);
-        else {
-          drawTopCanvas(c.texCanvas, c.k, d, this.getImg);
-          c.tex.needsUpdate = true;
-          this._clearSideWrap(c, d);
-        }
-        if (!imgPending) { c.v = d.v; c.wrapState = wrap; }
-      }
-      if (!wrap) {
-        const bg = d.bg || "#e9ecf5";
-        c.sideMats.forEach(m => m.color.set(bg));
+    let changed = false;
+    if (this.single) {
+      if (this._singleCap) { this._singleCap.d = this._targetDesign; changed = this._refreshOne(this._singleCap); }
+    } else {
+      for (const c of this.caps) {
+        c.d = this.designs[c.index];
+        if (this._refreshOne(c)) changed = true;
       }
     }
 
     const hex = this._plate && this._plate.material.color.getHexString();
-    if (hex && hex !== this.plateColor.replace("#", "").toLowerCase()) this._applyPlate();
+    if (hex && hex !== this.plateColor.replace("#", "").toLowerCase()) {
+      this._applyPlate();
+      changed = true;
+    }
+    return changed;
+  }
+
+  _refreshOne(c) {
+    const d = c.d;
+    if (!d) return false;
+    const img = d.img ? this.getImg(d.img.data) : null;
+    const imgOk = img && img.complete && img.naturalWidth > 0;
+    const imgPending = d.img && !imgOk;
+    const wrap = !!(d.img && d.img.wrap === "net") && imgOk;
+    /* 新图加载中：保持当前包裹画面不变，避免中途回退成仅顶面 */
+    if (imgPending && c.wrapState) return false;
+    let changed = false;
+    if (d.v !== c.v || imgPending || wrap !== c.wrapState) {
+      if (wrap) this._applyWrapNet(c, d, img);
+      else {
+        drawTopCanvas(c.texCanvas, c.k, d, this.getImg);
+        c.tex.needsUpdate = true;
+        this._clearSideWrap(c, d);
+      }
+      if (!imgPending) { c.v = d.v; c.wrapState = wrap; }
+      changed = true;
+    }
+    if (!wrap) {
+      /* 侧面底色：仅在实际变化时写入材质（避免每帧 uniform 上传）；
+       * 未包裹布局下只有合并侧壁材质（索引 0）参与绘制 */
+      const bg = d.bg || "#e9ecf5";
+      if (c._bgApplied !== bg) {
+        c.sideMats[0].color.set(bg);
+        c._bgApplied = bg;
+        changed = true;
+      }
+    }
+    return changed;
   }
 
   /* ----- 十字展开取模：按真实展开尺寸取样（与取模预览完全一致）
@@ -543,6 +636,7 @@ class View {
   _applyWrapNet(c, d, img) {
     /* 重建纹理对象：同一 CanvasTexture 反复更新后，部分环境的 GPU 上传会
      * 残留旧内容（重复标志 / 旧帧叠加 = "图中图"），每次应用换新对象根治 */
+    if (c.mesh.geometry.groups !== c.groups6) c.mesh.geometry.groups = c.groups6;
     c.tex.dispose();
     c.tex = makeCapTexture(c.texCanvas);
     c.topMat.map = c.tex;
@@ -665,6 +759,7 @@ class View {
   }
 
   _clearSideWrap(c, d) {
+    if (c.mesh.geometry.groups !== c.groups3) c.mesh.geometry.groups = c.groups3;
     c.sideMats.forEach((m, j) => {
       if (m.map) { m.map = null; m.needsUpdate = true; }
       m.color.set((d && d.bg) || "#e9ecf5");
@@ -683,21 +778,29 @@ class View {
     return (c && c.netLayout) ? c.netLayout : null;
   }
 
+  /* 像素比上限 1.75：4K/高 DPI 下填充率减半，肉眼无感差异 */
+  _dpr() {
+    return Math.min(window.devicePixelRatio || 1, 1.75);
+  }
+
   _updateCamera() {
+    let resized = false;
     const cw = this.canvas.clientWidth, chh = this.canvas.clientHeight;
-    if (cw < 4 || chh < 4) return;
-    const dpr = window.devicePixelRatio || 1;
-    if (this.canvas.width !== Math.round(cw * dpr) || this.canvas.height !== Math.round(chh * dpr)) {
-      this.renderer.setPixelRatio(dpr);
-      this.renderer.setSize(cw, chh, false);
-      this.camera.aspect = cw / chh;
-      this.camera.updateProjectionMatrix();
+    if (cw > 4 && chh > 4) {
+      const dpr = this._dpr();
+      if (this.canvas.width !== Math.round(cw * dpr) || this.canvas.height !== Math.round(chh * dpr)) {
+        this.renderer.setPixelRatio(dpr);
+        this.renderer.setSize(cw, chh, false);
+        this.camera.aspect = cw / chh;
+        this.camera.updateProjectionMatrix();
+        resized = true;
+      }
     }
 
     let target, radius;
     if (this.single) {
       const k = this._targetKey;
-      if (!k) return;
+      if (!k) return resized;
       target = new THREE.Vector3(k.w / 2, FLOAT + 0.15, k.h / 2);
       radius = 0.62 * Math.hypot(k.w, k.h) + 0.9;
     } else {
@@ -712,15 +815,22 @@ class View {
       target.z + dist * Math.cos(yaw) * Math.cos(elev)
     );
     this.camera.lookAt(target);
+    return resized;
   }
 
   _frame() {
     if (this.single && !this._targetKey) return;
-    if (this.autorotate && !this._dragging && Date.now() > this._idleUntil) {
-      this.orbit.yaw += 0.006;
-    }
-    this._refreshCaps();
-    this._updateCamera();
+    const spinning = this.autorotate && !this._dragging && Date.now() > this._idleUntil;
+    let contentDirty = false;
+    if (spinning) { this.orbit.yaw += 0.006; this._needsRender = true; }
+    if (this._refreshCaps()) { this._needsRender = true; contentDirty = true; }
+    if (this._updateCamera()) { this._needsRender = true; contentDirty = true; }
+    /* 按需渲染：静止帧直接跳过，画面保持上一帧内容 */
+    if (!this._needsRender) return;
+    /* 仅自动旋转产生的脏帧：限流 ~25fps，内容变更仍即时渲染 */
+    if (!contentDirty && performance.now() - (this._lastSpinRender || 0) < 40) return;
+    this._needsRender = false;
+    if (!contentDirty) this._lastSpinRender = performance.now();
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -743,6 +853,7 @@ class View {
         this.orbit.yaw -= dx * 0.005;
         this.orbit.elev = Math.max(0.12, Math.min(1.42, this.orbit.elev + dy * 0.005));
         this._idleUntil = Date.now() + 2400;
+        this._needsRender = true;
         down.x = e.clientX; down.y = e.clientY;
       }
     });
@@ -758,6 +869,7 @@ class View {
       e.preventDefault();
       this.orbit.zoom = Math.max(0.5, Math.min(2.5, this.orbit.zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1)));
       this._idleUntil = Date.now() + 2400;
+      this._needsRender = true;
     }, { passive: false });
     cv.addEventListener("dblclick", e => {
       if (this.onDoubleClick) this.onDoubleClick(this.pickAt(e.clientX, e.clientY));
@@ -788,7 +900,7 @@ class View {
     this._updateCamera();
     this.renderer.render(this.scene, this.camera);
     const url = this.canvas.toDataURL("image/png");
-    this.renderer.setPixelRatio(dpr);
+    this.renderer.setPixelRatio(this._dpr());
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();

@@ -69,7 +69,8 @@
         hover: null,
         plateColor: "#23252f",
         profile: "oem",        // 键帽高度档案
-        mode: "flat"           // flat | 3d
+        mode: "flat",          // flat | 3d
+        designCounter: 0       // 设计变更计数（per-key .v，驱动 3D 纹理刷新）
       });
 
       /* ================= 非响应式（渲染引擎侧） ================= */
@@ -88,6 +89,22 @@
       const zoom3d = ref(false);
       const capColorAll = ref("#e9ecf5");
       const hint = ref(HINT_FLAT);
+
+      /* 界面主题：classic | tech（本地偏好，不属于工程数据） */
+      const VIEW_BG = { classic: "#edeae3", tech: "#0f1626" };
+      const theme = ref(localStorage.getItem("keycap-theme") === "tech" ? "tech" : "classic");
+      document.documentElement.setAttribute("data-theme", theme.value === "tech" ? "tech" : "");
+      function applyViewBg() {
+        const c = VIEW_BG[theme.value] || VIEW_BG.classic;
+        if (boardView) boardView.setClearColor(c);
+        if (singleView) singleView.setClearColor(c);
+      }
+      function setTheme(v) {
+        theme.value = v === "tech" ? "tech" : "classic";
+        document.documentElement.setAttribute("data-theme", theme.value === "tech" ? "tech" : "");
+        try { localStorage.setItem("keycap-theme", theme.value); } catch (e) { /* 忽略 */ }
+        applyViewBg();
+      }
 
       /* ================= 模板引用 ================= */
       const boardRef = ref(null), board3dRef = ref(null), key3dRef = ref(null),
@@ -116,7 +133,12 @@
         toastTimer = setTimeout(() => { toastOn.value = false; }, 1800);
       }
 
-      function touchDesign(d) { d.v = ++state.designCounter; }
+      function touchDesign(d) {
+        if (typeof state.designCounter !== "number" || !Number.isFinite(state.designCounter)) {
+          state.designCounter = 0;
+        }
+        d.v = ++state.designCounter;
+      }
       function touchCur() { if (curDesign.value) touchDesign(curDesign.value); }
 
       function setCur(field, v) {
@@ -189,6 +211,7 @@
         if (!P3 || !key3dRef.value) return;
         singleView = P3.createSingleView(key3dRef.value, { getImg });
         window.__dbs = singleView; /* 调试用 */
+        applyViewBg();
         if (state.selected != null) {
           singleView.setTarget(state.keys[state.selected], state.designs[state.selected]);
         }
@@ -211,6 +234,7 @@
         boardView.setScene(state.keys, state.designs, state.plateColor, state.profile);
         boardView.setSelected(state.selected);
         boardView.setActive(true);
+        applyViewBg();
         window.__dbv = boardView; /* 调试用 */
       }
 
@@ -431,14 +455,15 @@
         buildLayout(getLayoutRows(e.target.value), e.target.value, true);
       }
 
-      function toggle3d() {
-        if (!P3) {
-          toast("Three.js 未加载成功，无法使用 3D 预览");
-          return;
-        }
-        state.mode = state.mode === "3d" ? "flat" : "3d";
-        hint.value = state.mode === "3d" ? HINT_3D : HINT_FLAT;
-        if (state.mode === "3d") {
+      function setMode(m) {
+        if (m === state.mode) return;
+        if (m === "3d") {
+          if (!P3) {
+            toast("Three.js 未加载成功，无法使用 3D 预览");
+            return;
+          }
+          state.mode = "3d";
+          hint.value = HINT_3D;
           nextTick(() => {
             if (board3dRef.value && scrollRef.value) {
               board3dRef.value.style.width = (scrollRef.value.clientWidth - 48) + "px";
@@ -452,8 +477,10 @@
             }
             dirty = true;
           });
-        } else if (boardView) {
-          boardView.setActive(false);
+        } else {
+          state.mode = "flat";
+          hint.value = HINT_FLAT;
+          if (boardView) boardView.setActive(false);
         }
       }
 
@@ -796,14 +823,14 @@
 
       return {
         /* 状态 */
-        state, toastMsg, toastOn, zoom3d, capColorAll, hint,
+        state, toastMsg, toastOn, zoom3d, capColorAll, hint, theme, setTheme,
         /* 引用 */
         boardRef, board3dRef, key3dRef, netPreviewRef, scrollRef, overlayStageRef,
         imgInputRef, kleInputRef, projInputRef, key3dHomeRef,
         /* 计算属性 */
         curKey, curDesign, hasSel, keyTitle, keySub, autoLegend, netShow, imgWrapShown,
         /* 动作 */
-        onLayoutChange, toggle3d, applyAll, resetKey, clearAll, applyGlobalColor,
+        onLayoutChange, setMode, applyAll, resetKey, clearAll, applyGlobalColor,
         legendAuto, onProfileChange, uploadClick, onImgFile, removeImg,
         importKLEClick, onKLEFile, exportBoard, exportKey, exportKey3d,
         saveProject, loadProjectClick, onProjFile, zoomOpen, zoomClose,
