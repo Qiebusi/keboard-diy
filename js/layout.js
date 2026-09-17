@@ -92,29 +92,57 @@ function layoutBounds(keys) {
 }
 
 /* =========================================================
- * 键帽高度档案（真实键帽分排规格）
- * 高度单位 mm（键帽顶面到键盘定位板），倾角单位度（正 = 前缘低）
+ * 键帽高度档案（真实键帽分排规格，数值取自 KeyV2 对 GMK / SP 实物的实测建模）
+ * 高度单位 mm（裙边底到顶面），倾角单位度（正 = 前缘低）
  * rows 依次为：R1 数字排 / R2 Q 排 / R3 home 排 / R4 Z 排 / 底排
- * f = F 功能排，space = 空格
+ * f = F 功能排（与 R1 同规格），space = 空格
+ *
+ * 横截面参数（mm，均为每侧值）：
+ *   gap  底面相对键位格的内缩（相邻键帽之间的缝隙）
+ *   xi   顶面相对底面的内缩（左右方向）
+ *   zi   顶面相对底面的内缩（前后方向）
+ *   skew 顶面整体后移量 —— 原厂后壁近垂直、前壁大幅内收即由此而来
+ *   dish 顶面凹面：cyl 圆柱（Cherry / OEM，只左右弯曲）/ sph 球面（SA / DSA）
  * ========================================================= */
 const KEYCAP_PROFILES = {
-  oem: { label: "OEM（标准）", f: [8.9, 13], rows: [[9.4, 10], [10.4, 6], [11.3, 0], [12.2, -10], [12.2, -10]], space: [11.6, -4] },
-  cherry: { label: "Cherry（原厂）", f: [6.2, 15], rows: [[6.7, 12], [7.6, 7], [8.1, 0], [8.9, -13], [8.5, -13]], space: [8.0, -6] },
-  sa: { label: "SA（球帽）", f: [11.9, 13], rows: [[12.7, 11], [13.7, 6], [14.3, 0], [13.0, -12], [12.6, -12]], space: [12.4, -5] },
-  dsa: { label: "DSA（等高）", f: [7.3, 0], rows: [[7.3, 0], [7.3, 0], [7.3, 0], [7.3, 0], [7.3, 0]], space: [7.3, 0] },
-  xda: { label: "XDA（等高）", f: [8.4, 0], rows: [[8.4, 0], [8.4, 0], [8.4, 0], [8.4, 0], [8.4, 0]], space: [8.4, 0] }
+  oem: {
+    label: "OEM（标准）", gap: 0.5, xi: 2.9, zi: 2.0, skew: 1.75, dish: { type: "cyl", depth: 1.0 },
+    f: [11.2, 3], rows: [[9.45, -1], [9.0, -6], [9.25, -9], [9.25, -10], [9.25, -10]], space: [9.25, 0]
+  },
+  cherry: {
+    label: "Cherry（原厂）", gap: 0.445, xi: 3.155, zi: 1.76, skew: 2.0, dish: { type: "cyl", depth: 0.65 },
+    f: [9.8, 0], rows: [[9.8, 0], [7.45, -2.5], [6.55, -5], [7.35, -11.5], [7.35, -11.5]], space: [7.35, 0]
+  },
+  sa: {
+    label: "SA（球帽）", gap: 0.325, xi: 2.85, zi: 2.85, skew: 0, dish: { type: "sph", depth: 0.85 },
+    f: [14.89, 13], rows: [[14.89, 13], [12.925, 7], [12.5, 0], [12.925, -7], [12.5, 0]], space: [12.5, 0]
+  },
+  dsa: {
+    label: "DSA（等高）", gap: 0.405, xi: 3.0, zi: 3.0, skew: 0, dish: { type: "sph", depth: 1.2 },
+    f: [8.1, 0], rows: [[8.1, 0], [8.1, 0], [8.1, 0], [8.1, 0], [8.1, 0]], space: [8.1, 0]
+  },
+  xda: {
+    label: "XDA（等高）", gap: 0.325, xi: 2.381, zi: 2.381, skew: 0, dish: null,
+    f: [8.4, 0], rows: [[8.4, 0], [8.4, 0], [8.4, 0], [8.4, 0], [8.4, 0]], space: [8.4, 0]
+  }
 };
 
 const MM_PER_U = 19.05;
 
-/* 根据键位求所在排的高度参数
+/* 根据键位求所在排的高度参数（长度统一换算为 u，供几何使用）
  * hasFRow：布局是否含 F 功能排（TKL / 104 的第 0 行） */
 function keycapProfileFor(k, hasFRow, profileName) {
   const P = KEYCAP_PROFILES[profileName] || KEYCAP_PROFILES.oem;
-  if (k.w >= 5) return { h: P.space[0] / MM_PER_U, tilt: P.space[1] * Math.PI / 180 };
-  let ri = hasFRow ? k.y : k.y + 1;
-  ri = Math.max(0, Math.min(5, ri));
-  if (ri === 0) return { h: P.f[0] / MM_PER_U, tilt: P.f[1] * Math.PI / 180 };
-  const r = P.rows[ri - 1];
-  return { h: r[0] / MM_PER_U, tilt: r[1] * Math.PI / 180 };
+  let r = P.space;
+  if (k.w < 5) {
+    let ri = hasFRow ? k.y : k.y + 1;
+    ri = Math.max(0, Math.min(5, ri));
+    r = ri === 0 ? P.f : P.rows[ri - 1];
+  }
+  const u = mm => mm / MM_PER_U;
+  return {
+    h: u(r[0]), tilt: r[1] * Math.PI / 180,
+    gap: u(P.gap), xi: u(P.xi), zi: u(P.zi), skew: u(P.skew),
+    dish: P.dish ? { type: P.dish.type, depth: u(P.dish.depth) } : null
+  };
 }

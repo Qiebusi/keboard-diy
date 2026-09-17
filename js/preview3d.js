@@ -24,7 +24,6 @@ if (!window.THREE) {
   return;
 }
 
-const TI = 0.125;          // 顶面内缩（1u 顶面 ≈ 0.66u，与实物一致）
 const PXU = 200;           // 纹理分辨率（px / u）
 const FOV = 40;
 const FLOAT = 0.34;        // 裙边底部离底板高度（露出轴体上座）
@@ -92,16 +91,44 @@ function legendColor(d) {
  * 布局：      [北壁 yB]
  * [西壁 ch] [顶面 tw×th] [东壁 ch]
  *           [南壁 yF]
- * 相邻区域重叠 TI，保证折叠线两侧图案连续                       */
+ * 壁面 UV 与顶面同尺度映射，越出顶面区域的部分与相邻壁区域重叠，
+ * 保证折叠线两侧图案连续                                        */
 function netDims(k, rowP) {
-  const tw = k.w - 2 * TI, th = k.h - 2 * TI;
-  const ch = rowP.h, tilt = rowP.tilt || 0;
-  const yB = ch + Math.sin(tilt) * (k.h / 2 - TI);
-  const yF = ch - Math.sin(tilt) * (k.h / 2 - TI);
+  const gap = rowP.gap, xi = rowP.xi, zi = rowP.zi, skew = rowP.skew;
+  const tw = k.w - 2 * (gap + xi), th = k.h - 2 * (gap + zi);
+  const ch = rowP.h, tan = Math.tan(rowP.tilt || 0);
+  const yB = ch + tan * th / 2;      // 北（后）壁高 = 顶面后缘高
+  const yF = ch - tan * th / 2;      // 南（前）壁高 = 顶面前缘高
   return {
-    tw, th, ch, yB, yF, kw: k.w, kh: k.h,
+    tw, th, ch, yB, yF, xi, gap,
+    zBt: gap + zi - skew,            // 顶面后缘的局部 z
+    eB: skew - zi,                   // 底面后缘相对顶面后缘的外扩量
+    eF: zi + skew,                   // 底面前缘相对顶面前缘的外扩量
     NW: Math.max(8, Math.round((ch + tw + ch) * PXU)),
     NH: Math.max(8, Math.round((yB + th + yF) * PXU))
+  };
+}
+
+/* ---------- 顶面凹面（KeyV2 dish） ----------
+ * 返回 (dx, dz) → 凹陷量（≤0，u 单位），dx/dz 为距顶面中心的偏移 */
+function makeDish(dish, tw, th) {
+  if (!dish || !(dish.depth > 0)) return null;
+  const d = dish.depth;
+  if (dish.type === "sph") {
+    /* 球面：椭球以顶面对角线为弦，下凹量沿两个方向同时变化，只有四角贴合原平面 */
+    const hc = Math.hypot(tw, th) / 2;
+    return (dx, dz) => {
+      const r2 = (dx * dx + dz * dz) / (hc * hc);
+      return r2 >= 1 ? 0 : d * (Math.sqrt(1 - r2) - 1);
+    };
+  }
+  /* 圆柱：圆弧以顶面宽度为弦，前后方向等深；左右边缘贴合、中间最深 */
+  const hw = tw / 2;
+  const rad = (tw * tw + 4 * d * d) / (8 * d);   // 圆弧半径（弦宽 tw、矢高 d）
+  const drop = rad - d;                          // 圆心到原平面的距离
+  return dx => {
+    const ax = Math.abs(dx);
+    return ax >= hw ? 0 : drop - Math.sqrt(rad * rad - ax * ax);
   };
 }
 
@@ -159,40 +186,60 @@ function drawNetCanvas(cv, dims, d, k, getImg) {
   g.restore();
 }
 
-/* ---------- 键帽几何（三段裙边 + 锥度 + 分排倾角） ----------
+/* ---------- 键帽几何（三段裙边 + 锥度 + 分排倾角 + 顶面凹面） ----------
+ * 横截面按真实键帽：底面内缩 gap，顶面按 xi/zi 内缩并整体后移 skew，
+ * 顶面与四壁上缘共用同一凹面函数，网格在折缝处闭合
  * UV 直接映射到展开图画布区域：
  *   顶面 → 顶面矩形；四壁 → 各壁条带（折叠翻转/转置在 UV 中完成）；
  *   底面 → 画布底部色条
- * 壁面 UV 约定：u 沿壁横向，v=0 底缘 / v=1 折缝（与顶面相邻）        */
+ * 壁面 UV 约定：t 沿壁横向（北/南为 x，东/西为 z），
+ *               v=0 底缘 / v=1 折缝（与顶面相邻）                    */
 function capGeometry(k, params, dims) {
-  const w = k.w, hh = k.h, ch = params.h, tilt = params.tilt || 0;
-  const yB = dims.yB, yF = dims.yF;
-  const z1 = ch * 0.32, r1 = 0.03;
+  const w = k.w, hh = k.h, ch = params.h;
+  const yB = dims.yB, yF = dims.yF, tw = dims.tw, th = dims.th;
+  const yMid = ch * 0.32, r1 = 0.03;   // 裙边底部收分（锥度折线高度 / 收分量）
   const pos = [], uvs = [];
   const S = PXU;
   const U = px => px / dims.NW;
   const V = py => 1 - py / (dims.NH + BP);
 
+  /* 三个环：底环（y=0）→ 中环（y=yMid）→ 顶环（按凹面/倾角起伏） */
+  const bx0 = dims.gap, bx1 = w - dims.gap, bz0 = dims.gap, bz1 = hh - dims.gap;
+  const mx0 = bx0 + r1, mx1 = bx1 - r1, mz0 = bz0 + r1, mz1 = bz1 - r1;
+  const tx0 = bx0 + dims.xi, tx1 = bx1 - dims.xi;
+  const tz0 = dims.zBt, tz1 = dims.zBt + th;
+  const xc = (tx0 + tx1) / 2, zc = (tz0 + tz1) / 2;
+  const tan = Math.tan(params.tilt || 0);
+  const dish = makeDish(params.dish, tw, th);
+  /* 顶面高度：分排倾角（绕顶面中心）+ 凹面下凹量 */
+  const topY = (x, z) => {
+    const y = ch + tan * (zc - z);
+    return dish ? y + dish(x - xc, z - zc) : y;
+  };
+  const lerp = (a, b, s) => a + (b - a) * s;
+  const NX = Math.max(4, Math.min(48, Math.round(tw * 8)));
+  const NZ = Math.max(4, Math.min(24, Math.round(th * 8)));
+
   /* 四壁 UV：face 0北 1东 2南 3西 */
-  function wUV(face, u, v) {
+  function wUV(face, t, v) {
     let nx, ny;
     if (face === 0) {          // 北：折缝在区域下缘
-      nx = (dims.ch - TI + u * dims.kw) * S;
+      nx = (dims.ch + t - tx0) * S;
       ny = v * dims.yB * S;
     } else if (face === 1) {   // 东：竖条，折缝在左缘（转置）
       nx = (dims.ch + dims.tw + (1 - v) * dims.ch) * S;
-      ny = (dims.yB - TI + u * dims.kh) * S;
+      ny = (dims.yB + t - tz0) * S;
     } else if (face === 2) {   // 南：折缝在区域上缘
-      nx = (dims.ch - TI + u * dims.kw) * S;
+      nx = (dims.ch + t - tx0) * S;
       ny = (dims.yB + dims.th + (1 - v) * dims.yF) * S;
     } else {                   // 西：竖条，折缝在右缘（反向转置闭合）
       nx = v * dims.ch * S;
-      ny = (dims.yB - TI + (1 - u) * dims.kh) * S;
+      ny = (dims.yB + tz1 - t) * S;
     }
     return [U(nx), V(ny)];
   }
-  function tUV(x, z) {         // 顶面：后缘(z=TI)为纹理上缘
-    return [U((dims.ch + x - TI) * S), V((dims.yB + z - TI) * S)];
+  function tUV(x, z) {         // 顶面：后缘（z = tz0）为纹理上缘
+    return [U((dims.ch + x - tx0) * S), V((dims.yB + z - tz0) * S)];
   }
   const bUV = [U(1), V(dims.NH + BP / 2)];
 
@@ -215,37 +262,58 @@ function capGeometry(k, params, dims) {
     uvs.push(ua[0], ua[1], uc[0], uc[1], ud[0], ud[1]);
   }
 
-  /* 北（后缘，-z）：裙边 + 锥形两段，壁高 yB */
-  quad([0, 0, -1], [0, 0, 0], [w, 0, 0], [w - r1, z1, r1], [r1, z1, r1],
-    wUV(0, 0, 0), wUV(0, 1, 0), wUV(0, 1 - r1 / w, z1 / yB), wUV(0, r1 / w, z1 / yB));
-  quad([0, 0, -1], [r1, z1, r1], [w - r1, z1, r1], [w - TI, yB, TI], [TI, yB, TI],
-    wUV(0, r1 / w, z1 / yB), wUV(0, 1 - r1 / w, z1 / yB), wUV(0, 1 - TI / w, 1), wUV(0, TI / w, 1));
+  /* 北 / 南壁（壁高 yB / yF）：底环 → 中环 → 顶环，顶缘跟随凹面起伏 */
+  for (let i = 0; i < NX; i++) {
+    const s0 = i / NX, s1 = (i + 1) / NX;
+    const xa0 = lerp(bx0, bx1, s0), xa1 = lerp(bx0, bx1, s1);
+    const xm0 = lerp(mx0, mx1, s0), xm1 = lerp(mx0, mx1, s1);
+    const xt0 = lerp(tx0, tx1, s0), xt1 = lerp(tx0, tx1, s1);
 
-  /* 东（+x），壁高 ch */
-  quad([1, 0, 0], [w, 0, 0], [w, 0, hh], [w - r1, z1, hh - r1], [w - r1, z1, r1],
-    wUV(1, 0, 0), wUV(1, 1, 0), wUV(1, 1 - r1 / hh, z1 / ch), wUV(1, r1 / hh, z1 / ch));
-  quad([1, 0, 0], [w - r1, z1, r1], [w - r1, z1, hh - r1], [w - TI, yF, hh - TI], [w - TI, yB, TI],
-    wUV(1, r1 / hh, z1 / ch), wUV(1, 1 - r1 / hh, z1 / ch), wUV(1, 1 - TI / hh, 1), wUV(1, TI / hh, 1));
+    quad([0, 0, -1], [xa0, 0, bz0], [xa1, 0, bz0], [xm1, yMid, mz0], [xm0, yMid, mz0],
+      wUV(0, xa0, 0), wUV(0, xa1, 0), wUV(0, xm1, yMid / yB), wUV(0, xm0, yMid / yB));
+    quad([0, 0, -1], [xm0, yMid, mz0], [xm1, yMid, mz0],
+      [xt1, topY(xt1, tz0), tz0], [xt0, topY(xt0, tz0), tz0],
+      wUV(0, xm0, yMid / yB), wUV(0, xm1, yMid / yB), wUV(0, xt1, 1), wUV(0, xt0, 1));
 
-  /* 南（前缘，+z），壁高 yF */
-  quad([0, 0, 1], [w, 0, hh], [0, 0, hh], [r1, z1, hh - r1], [w - r1, z1, hh - r1],
-    wUV(2, 1, 0), wUV(2, 0, 0), wUV(2, r1 / w, z1 / yF), wUV(2, 1 - r1 / w, z1 / yF));
-  quad([0, 0, 1], [w - r1, z1, hh - r1], [r1, z1, hh - r1], [TI, yF, hh - TI], [w - TI, yF, hh - TI],
-    wUV(2, 1 - r1 / w, z1 / yF), wUV(2, r1 / w, z1 / yF), wUV(2, TI / w, 1), wUV(2, 1 - TI / w, 1));
+    quad([0, 0, 1], [xa0, 0, bz1], [xa1, 0, bz1], [xm1, yMid, mz1], [xm0, yMid, mz1],
+      wUV(2, xa0, 0), wUV(2, xa1, 0), wUV(2, xm1, yMid / yF), wUV(2, xm0, yMid / yF));
+    quad([0, 0, 1], [xm0, yMid, mz1], [xm1, yMid, mz1],
+      [xt1, topY(xt1, tz1), tz1], [xt0, topY(xt0, tz1), tz1],
+      wUV(2, xm0, yMid / yF), wUV(2, xm1, yMid / yF), wUV(2, xt1, 1), wUV(2, xt0, 1));
+  }
 
-  /* 西（-x），壁高 ch */
-  quad([-1, 0, 0], [0, 0, hh], [0, 0, 0], [r1, z1, r1], [r1, z1, hh - r1],
-    wUV(3, 0, 0), wUV(3, 1, 0), wUV(3, 1 - r1 / hh, z1 / ch), wUV(3, r1 / hh, z1 / ch));
-  quad([-1, 0, 0], [r1, z1, r1], [r1, z1, hh - r1], [TI, yF, hh - TI], [TI, yB, TI],
-    wUV(3, r1 / hh, z1 / ch), wUV(3, 1 - r1 / hh, z1 / ch), wUV(3, 1 - TI / hh, 1), wUV(3, TI / hh, 1));
+  /* 东 / 西壁（壁高 ch）：顶缘沿 z 跟随倾角与凹面（圆柱凹面在左右边缘为 0，
+      球面凹面在中段仍下凹，故同样按 z 取样） */
+  for (let i = 0; i < NZ; i++) {
+    const s0 = i / NZ, s1 = (i + 1) / NZ;
+    const za0 = lerp(bz0, bz1, s0), za1 = lerp(bz0, bz1, s1);
+    const zm0 = lerp(mz0, mz1, s0), zm1 = lerp(mz0, mz1, s1);
+    const zt0 = lerp(tz0, tz1, s0), zt1 = lerp(tz0, tz1, s1);
+
+    quad([1, 0, 0], [bx1, 0, za0], [bx1, 0, za1], [mx1, yMid, zm1], [mx1, yMid, zm0],
+      wUV(1, za0, 0), wUV(1, za1, 0), wUV(1, zm1, yMid / ch), wUV(1, zm0, yMid / ch));
+    quad([1, 0, 0], [mx1, yMid, zm0], [mx1, yMid, zm1],
+      [tx1, topY(tx1, zt1), zt1], [tx1, topY(tx1, zt0), zt0],
+      wUV(1, zm0, yMid / ch), wUV(1, zm1, yMid / ch), wUV(1, zt1, 1), wUV(1, zt0, 1));
+
+    quad([-1, 0, 0], [bx0, 0, za0], [bx0, 0, za1], [mx0, yMid, zm1], [mx0, yMid, zm0],
+      wUV(3, za0, 0), wUV(3, za1, 0), wUV(3, zm1, yMid / ch), wUV(3, zm0, yMid / ch));
+    quad([-1, 0, 0], [mx0, yMid, zm0], [mx0, yMid, zm1],
+      [tx0, topY(tx0, zt1), zt1], [tx0, topY(tx0, zt0), zt0],
+      wUV(3, zm0, yMid / ch), wUV(3, zm1, yMid / ch), wUV(3, zt1, 1), wUV(3, zt0, 1));
+  }
 
   /* 底面（防止低角度看穿裙边） */
-  quad([0, -1, 0], [0, 0, 0], [0, 0, hh], [w, 0, hh], [w, 0, 0], bUV, bUV, bUV, bUV);
+  quad([0, -1, 0], [bx0, 0, bz0], [bx0, 0, bz1], [bx1, 0, bz1], [bx1, 0, bz0], bUV, bUV, bUV, bUV);
 
-  /* 顶面 */
-  quad([0, 1, 0],
-    [TI, yB, TI], [w - TI, yB, TI], [w - TI, yF, hh - TI], [TI, yF, hh - TI],
-    tUV(TI, TI), tUV(w - TI, TI), tUV(w - TI, hh - TI), tUV(TI, hh - TI));
+  /* 顶面：网格化以承载凹面（圆柱 / 球面） */
+  for (let i = 0; i < NX; i++) for (let j = 0; j < NZ; j++) {
+    const xa = lerp(tx0, tx1, i / NX), xb = lerp(tx0, tx1, (i + 1) / NX);
+    const za = lerp(tz0, tz1, j / NZ), zb = lerp(tz0, tz1, (j + 1) / NZ);
+    quad([0, 1, 0],
+      [xa, topY(xa, za), za], [xb, topY(xb, za), za], [xb, topY(xb, zb), zb], [xa, topY(xa, zb), zb],
+      tUV(xa, za), tUV(xb, za), tUV(xb, zb), tUV(xa, zb));
+  }
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
@@ -727,5 +795,5 @@ function createSingleView(canvas, opts = {}) {
   return v;
 }
 
-window.Preview3D = { createBoardView, createSingleView, TI };
+window.Preview3D = { createBoardView, createSingleView, netDims };
 })();

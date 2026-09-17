@@ -381,15 +381,11 @@
         const show = !!(d && d.img && d.img.wrap === "net") && i != null;
         if (!show) return;
 
-        /* 真实展开尺寸（u）：含顶面内缩、锥度、分排倾角 */
+        /* 真实展开尺寸（u）：底面 gap 内缩、顶面 xi/zi 内缩并后移 skew、分排倾角 */
         const k = state.keys[i];
-        const TI = Preview3D.TI;
         const prof = keycapProfileFor(k, layoutBounds(state.keys).H >= 5.9, state.profile);
-        const w = k.w, hh = k.h;
-        const tw = w - 2 * TI, th = hh - 2 * TI;
-        const ch = prof.h, tilt = prof.tilt || 0;
-        const yB = ch + Math.sin(tilt) * (hh / 2 - TI);
-        const yF = ch - Math.sin(tilt) * (hh / 2 - TI);
+        const dims = Preview3D.netDims(k, prof);
+        const tw = dims.tw, th = dims.th, ch = dims.ch, yB = dims.yB, yF = dims.yF;
 
         const wpx = Math.max(120, cv.parentElement.clientWidth - 2);
         const s = wpx / (2 * ch + tw);
@@ -403,15 +399,16 @@
         g.setTransform(dpr, 0, 0, dpr, 0, 0);
         g.clearRect(0, 0, wpx, hpx);
 
-        /* 真实十字展开（纸样模板）：顶面 + 四壁梯形臂，锥度收分与模型一致，折叠线处图案连续 */
+        /* 真实十字展开（纸样模板）：顶面 + 四壁梯形臂，收分与模型一致，折叠线处图案连续 */
         const xT0 = ch * s, xT1 = (ch + tw) * s, yT0 = yB * s, yT1 = (yB + th) * s;
-        const o = TI * s;
+        const o = dims.xi * s;                       // 底环左右缘相对顶面的外扩
+        const oB = dims.eB * s, oF = dims.eF * s;    // 底环后/前缘相对顶面的外扩
         const polys = [
           [xT0, yT0, xT1, yT0, xT1, yT1, xT0, yT1],             // 顶面 tw × th
           [xT0 - o, 0, xT1 + o, 0, xT1, yT0, xT0, yT0],         // 北壁梯形：折缝 tw，外缘 w，高 yB
           [xT0, yT1, xT1, yT1, xT1 + o, hpx, xT0 - o, hpx],     // 南壁梯形：高 yF
-          [xT0, yT0, 0, yT0 - o, 0, yT1 + o, xT0, yT1],         // 西壁梯形：折缝 th，外缘 hh
-          [xT1, yT0, wpx, yT0 - o, wpx, yT1 + o, xT1, yT1]      // 东壁梯形
+          [xT0, yT0, 0, yT0 + oB, 0, yT1 + oF, xT0, yT1],       // 西壁梯形：折缝 th，外缘 hh
+          [xT1, yT0, wpx, yT0 + oB, wpx, yT1 + oF, xT1, yT1]    // 东壁梯形
         ];
         const tracePoly = f => {
           for (let j = 0; j < f.length; j += 2) j ? g.lineTo(f[j], f[j + 1]) : g.moveTo(f[j], f[j + 1]);
