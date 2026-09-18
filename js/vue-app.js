@@ -125,13 +125,13 @@
       const imgWrapShown = computed(() =>
         (curDesign.value && curDesign.value.img && curDesign.value.img.wrap === "net") ? "net" : "top");
 
-      /* 平面视图的横截面参数：与 3D 共用同一套档案数据（gap / xi / zi，u 单位），
-         gap/xi/zi 只跟档案有关、与排无关，故取任意一键即可 */
+      /* 平面视图的横截面参数：与 3D 共用同一套档案数据（gap / xi / zB / zF，u 单位），
+         只跟档案有关、与排无关，故取任意一键即可 */
       function flatInsets() {
         const k = state.keys[0];
         if (!k) return null;
         const p = keycapProfileFor(k, layoutBounds(state.keys).H >= 5.9, state.profile);
-        return { gap: p.gap, xi: p.xi, zi: p.zi };
+        return { gap: p.gap, xi: p.xi, zB: p.zB, zF: p.zF };
       }
 
       /* ================= 基础动作 ================= */

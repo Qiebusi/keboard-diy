@@ -99,26 +99,30 @@ function legendColor(d) {
  * 顶面纸样纵向长 L = th / cos(倾角)（坡度方向的真实边长，不是投影长度）。
  * 画布坐标（u）：纸样包围盒左上角为原点。                          */
 function netDims(k, rowP) {
-  const gap = rowP.gap, xi = rowP.xi, zi = rowP.zi;
-  const tw = k.w - 2 * (gap + xi), th = k.h - 2 * (gap + zi);
+  const gap = rowP.gap, xi = rowP.xi;
+  /* 前后壁分别取值（keycapProfileFor 已拆好）：后壁恒向内、前壁保持大幅内收 */
+  const zB = rowP.zB != null ? rowP.zB : rowP.zi;   // 后壁内收
+  const zF = rowP.zF != null ? rowP.zF : rowP.zi;   // 前壁内收
+  const tw = k.w - 2 * (gap + xi);
+  const th = k.h - 2 * gap - zB - zF;               // 顶面纵向（前后）边长
   const ch = rowP.h, tilt = rowP.tilt || 0;
   const tan = Math.tan(tilt), ct = Math.cos(tilt), st = Math.sin(tilt);
   const yB = ch + tan * th / 2;      // 北（后）缘高
   const yF = ch - tan * th / 2;      // 南（前）缘高
   const L = th / ct;                 // 顶面纵向真实边长
-  const hN = Math.hypot(yB, zi);     // 北壁臂高（折缝→底环斜长）
-  const hS = Math.hypot(yF, zi);     // 南壁臂高
+  const hN = Math.hypot(yB, zB);     // 北壁臂高（折缝→底环斜长）
+  const hS = Math.hypot(yF, zF);     // 南壁臂高
   /* 东壁外缘两角：以折缝后角点为原点，沿折缝取 a、垂直折缝取 h */
   const aOf = wz => -st * (-yB) + ct * wz;
   const hOf = wz => Math.sqrt(xi * xi + yB * yB + wz * wz - aOf(wz) * aOf(wz));
-  const a0 = aOf(-zi), h0 = hOf(-zi);            // 底环后缘角
-  const a1 = aOf(th + zi), h1 = hOf(th + zi);    // 底环前缘角
+  const a0 = aOf(-zB), h0 = hOf(-zB);            // 底环后缘角
+  const a1 = aOf(th + zF), h1 = hOf(th + zF);    // 底环前缘角
   const hMax = Math.max(h0, h1);                 // 东/西壁最外点
   const offX = hMax, offY = hN;                  // 纸样 (0,0) 在画布中的位置
   const wU = tw + 2 * hMax, hU = hN + L + hS;
   return {
-    tw, th, ch, yB, yF, xi, zi, gap, ct, st, L, hN, hS, a0, a1, h0, h1,
-    zBt: gap + zi,                 // 顶面后缘的局部 z（自底环后缘内收 zi）
+    tw, th, ch, yB, yF, xi, zB, zF, gap, ct, st, L, hN, hS, a0, a1, h0, h1,
+    zBt: gap + zB,                 // 顶面后缘的局部 z（自底环后缘内收 zB）
     offX, offY,                    // 顶面纸样原点在画布中的位置
     topX: offX, topY: offY,
     wU, hU,                        // 纸样包围盒（u）
@@ -259,7 +263,8 @@ function drawNetCanvas(cv, dims, d, k, getImg) {
 }
 
 /* ---------- 键帽几何（单段直斜裙边 + 锥度 + 分排倾角 + 顶面凹面） ----------
- * 横截面按真实键帽：底环内缩 gap，顶面再按 xi/zi 内缩 —— 四壁统一向里收分，
+ * 横截面按真实键帽：底环内缩 gap，顶面再按 xi（左右）/ zB（后壁）/ zF（前壁）内缩
+ *   —— 四壁全部向里收分，后壁近垂直（zB 小）、前壁大幅内收（zF 大），绝不外扩
  * 裙边自底环一条直线直达顶环，不在中途折出台阶
  * 顶面与四壁上缘共用同一凹面函数，网格在折缝处闭合
  * UV 直接映射到纸样画布：
@@ -275,7 +280,7 @@ function capGeometry(k, params, dims) {
   const U = px => px / dims.NW;
   const V = py => 1 - py / (dims.NH + BP);
 
-  /* 两个环：底环（y=0，内缩 gap）→ 顶环（内缩 xi/zi，高度由倾角与凹面决定）
+  /* 两个环：底环（y=0，内缩 gap）→ 顶环（内缩 xi/zB/zF，高度由倾角与凹面决定）
      环尺寸取自展开映射，与取模预览共用同一份定义 */
   const nm = makeNetMap(k, dims);
   const bx0 = nm.bx0, bx1 = nm.bx1, bz0 = nm.bz0, bz1 = nm.bz1;
@@ -774,7 +779,9 @@ class View {
       if (Math.abs(dx) + Math.abs(dy) > 3) down.moved = true;
       if (down.moved) {
         this.orbit.yaw -= dx * 0.005;
-        this.orbit.elev = Math.max(0.12, Math.min(1.42, this.orbit.elev + dy * 0.005));
+        /* 俯仰几乎全放开：可绕到地平线以下看底面，也可压到接近正俯视。
+           只留 ±1.5rad（≈±86°）防止 camera.up 与视线共线导致 lookAt 退化 */
+        this.orbit.elev = Math.max(-1.5, Math.min(1.5, this.orbit.elev + dy * 0.005));
         this._idleUntil = Date.now() + 2400;
         this._needsRender = true;
         down.x = e.clientX; down.y = e.clientY;

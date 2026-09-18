@@ -46,26 +46,29 @@ const Render = (() => {
     return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
   }
 
-  /* 横截面参数缺省值（u，每侧）：OEM 的 gap 0.5mm / xi 2.9mm / zi 2.0mm。
+  /* 横截面参数缺省值（u，每侧）：OEM 的 gap 0.5mm / xi 2.9mm / 后壁 0.25mm / 前壁 3.75mm。
    * 实际值由调用方按当前高度档案传入（o.ins），保证平面与 3D 完全同口径 */
-  const DEFAULT_INS = { gap: 0.5 / 19.05, xi: 2.9 / 19.05, zi: 2.0 / 19.05 };
+  const DEFAULT_INS = { gap: 0.5 / 19.05, xi: 2.9 / 19.05, zB: 0.25 / 19.05, zF: 3.75 / 19.05 };
 
   /* 键帽几何（返回外框与顶面矩形）
    * ins 与 3D 的底环/顶环一致：外框 = 键位格内缩 gap，
-   * 顶面再按 xi（左右）/ zi（前后）内缩 —— 两者不等量，别用同一个值 */
+   * 顶面再按 xi（左右）/ zB（后壁）/ zF（前壁）内缩 —— 前后两壁不等量，别用同一个值 */
   function capGeom(key, U, ins) {
-    const { gap, xi, zi } = ins || DEFAULT_INS;
+    const src = ins || DEFAULT_INS;
+    const gap = src.gap, xi = src.xi;
+    const zB = src.zB != null ? src.zB : src.zi;   // 后壁内收（顶面后缘往里收）
+    const zF = src.zF != null ? src.zF : src.zi;   // 前壁内收
     const m = gap * U;                         // 键间隙（底面相对键位格的内缩）
     const x0 = key.x * U + m;
     const y0 = key.y * U + m;
     const w = key.w * U - 2 * m;
     const h = key.h * U - 2 * m;
     const tw = Math.max(w - 2 * xi * U, U * 0.2);
-    const th = Math.max(h - 2 * zi * U, U * 0.2);
+    const th = Math.max(h - (zB + zF) * U, U * 0.2);
     return {
       x: x0, y: y0, w, h,
       tx: x0 + (w - tw) / 2,
-      ty: y0 + (h - th) / 2,
+      ty: y0 + zB * U,
       tw, th,
       r: U * 0.115,
       rt: U * 0.085
@@ -96,7 +99,7 @@ const Render = (() => {
 
     /* --- 四条斜裙边棱线：底面角点 ↔ 顶面角点 ---
        俯视图靠这四条线才看得出是"四壁向里收分"的键帽：
-       收分量左右 = xi、前后 = zi，两者不等量，所以棱线不是 45°。
+       收分量左右 = xi、后 = zB、前 = zF，三者不等量，所以棱线不是 45°。
        起止点取圆角 45° 处的点（0.2929×半径），保证整条线都落在图形内 */
     ctx.save();
     ctx.strokeStyle = shade(bg, -66);
