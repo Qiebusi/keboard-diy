@@ -381,15 +381,15 @@
         const show = !!(d && d.img && d.img.wrap === "net") && i != null;
         if (!show) return;
 
-        /* 真实展开尺寸（u）：底环内缩 gap、顶面再按 xi/zi 内缩，四壁统一向里收分 */
+        /* 纸样轮廓直接取自 3D 的展开映射（Preview3D.netOutline）：
+           各壁绕自己的折缝摊平 —— 顶面有坡度时东/西壁是斜楔形，臂高沿折缝变化 */
         const k = state.keys[i];
         const prof = keycapProfileFor(k, layoutBounds(state.keys).H >= 5.9, state.profile);
-        const dims = Preview3D.netDims(k, prof);
-        const tw = dims.tw, th = dims.th, ch = dims.ch, yB = dims.yB, yF = dims.yF;
+        const { dims, polys: net } = Preview3D.netOutline(k, prof);
 
         const wpx = Math.max(120, cv.parentElement.clientWidth - 2);
-        const s = wpx / (2 * ch + tw);
-        const hpx = (yB + th + yF) * s;
+        const s = wpx / dims.wU;
+        const hpx = dims.hU * s;
         const dpr = window.devicePixelRatio || 1;
         if (cv.width !== Math.round(wpx * dpr) || cv.height !== Math.round(hpx * dpr)) {
           cv.width = Math.round(wpx * dpr); cv.height = Math.round(hpx * dpr);
@@ -399,17 +399,8 @@
         g.setTransform(dpr, 0, 0, dpr, 0, 0);
         g.clearRect(0, 0, wpx, hpx);
 
-        /* 真实十字展开（纸样模板）：顶面 + 四壁梯形臂，收分与模型一致，折叠线处图案连续 */
-        const xT0 = ch * s, xT1 = (ch + tw) * s, yT0 = yB * s, yT1 = (yB + th) * s;
-        const o = dims.xi * s;                       // 底环左右缘相对顶面的外扩
-        const oB = dims.eB * s, oF = dims.eF * s;    // 底环后/前缘相对顶面的外扩
-        const polys = [
-          [xT0, yT0, xT1, yT0, xT1, yT1, xT0, yT1],             // 顶面 tw × th
-          [xT0 - o, 0, xT1 + o, 0, xT1, yT0, xT0, yT0],         // 北壁梯形：折缝 tw，外缘 w，高 yB
-          [xT0, yT1, xT1, yT1, xT1 + o, hpx, xT0 - o, hpx],     // 南壁梯形：高 yF
-          [xT0, yT0, 0, yT0 + oB, 0, yT1 + oF, xT0, yT1],       // 西壁梯形：折缝 th，外缘 hh
-          [xT1, yT0, wpx, yT0 + oB, wpx, yT1 + oF, xT1, yT1]    // 东壁梯形
-        ];
+        /* 纸样坐标（u）→ 预览像素：顶面居中，四壁自顶面四缘折出 */
+        const polys = net.map(p => p.map(v => v * s));
         const tracePoly = f => {
           for (let j = 0; j < f.length; j += 2) j ? g.lineTo(f[j], f[j + 1]) : g.moveTo(f[j], f[j + 1]);
           g.closePath();
@@ -424,10 +415,10 @@
         g.clip();
         const img = d.img ? getImg(d.img.data) : null;
         if (img && img.complete && img.naturalWidth > 0) {
-          /* 顶面优先：铺满顶面区域，余出部分包四壁 */
-          const s2 = Math.max((tw * s) / img.naturalWidth, (th * s) / img.naturalHeight) * (d.img.scale || 1);
-          g.translate(ch * s + tw * s / 2 + (d.img.ox || 0) * tw * s,
-            yB * s + th * s / 2 + (d.img.oy || 0) * th * s);
+          /* 与 3D 纹理同一条基准：cover 铺满顶面纸样矩形，余出部分包住四壁 */
+          const s2 = Math.max((dims.tw * s) / img.naturalWidth, (dims.L * s) / img.naturalHeight) * (d.img.scale || 1);
+          g.translate((dims.topX + dims.tw / 2) * s + (d.img.ox || 0) * dims.tw * s,
+            (dims.topY + dims.L / 2) * s + (d.img.oy || 0) * dims.L * s);
           g.rotate((d.img.rot || 0) * Math.PI / 180);
           g.drawImage(img, -img.naturalWidth * s2 / 2, -img.naturalHeight * s2 / 2,
             img.naturalWidth * s2, img.naturalHeight * s2);

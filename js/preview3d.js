@@ -87,26 +87,95 @@ function legendColor(d) {
     (Render.luminance((d && d.bg) || "#e9ecf5") > 0.55 ? "#3a3d46" : "#e8eaf2");
 }
 
-/* ---------- 展开图布局（u 单位；画布像素 = u × PXU） ----------
- * 布局：      [北壁 yB]
- * [西壁 ch] [顶面 tw×th] [东壁 ch]
- *           [南壁 yF]
- * 壁面 UV 与顶面同尺度映射，越出顶面区域的部分与相邻壁区域重叠，
- * 保证折叠线两侧图案连续                                        */
+/* ---------- 纸样尺寸与布局（u 单位；画布像素 = u × PXU） ----------
+ * 纸样 = 把键帽沿四条折缝（顶面四缘）剪开、各壁绕自己的折缝摊平得到的纸样：
+ *
+ *            [   北壁   ]            北/南壁：折缝是水平边，外缘与折缝平行，
+ *   [西壁][ 顶面 tw×L ][东壁]         臂高 = 折缝到裙边底缘的真实斜长
+ *            [   南壁   ]            东/西壁：折缝是斜边（顶面有坡度），
+ *                                    沿折缝量 a、垂直折缝量 h —— 外缘既不
+ *                                    与折缝平行、臂高也沿折缝变化
+ *
+ * 顶面纸样纵向长 L = th / cos(倾角)（坡度方向的真实边长，不是投影长度）。
+ * 画布坐标（u）：纸样包围盒左上角为原点。                          */
 function netDims(k, rowP) {
   const gap = rowP.gap, xi = rowP.xi, zi = rowP.zi;
   const tw = k.w - 2 * (gap + xi), th = k.h - 2 * (gap + zi);
-  const ch = rowP.h, tan = Math.tan(rowP.tilt || 0);
-  const yB = ch + tan * th / 2;      // 北（后）壁高 = 顶面后缘高
-  const yF = ch - tan * th / 2;      // 南（前）壁高 = 顶面前缘高
+  const ch = rowP.h, tilt = rowP.tilt || 0;
+  const tan = Math.tan(tilt), ct = Math.cos(tilt), st = Math.sin(tilt);
+  const yB = ch + tan * th / 2;      // 北（后）缘高
+  const yF = ch - tan * th / 2;      // 南（前）缘高
+  const L = th / ct;                 // 顶面纵向真实边长
+  const hN = Math.hypot(yB, zi);     // 北壁臂高（折缝→底环斜长）
+  const hS = Math.hypot(yF, zi);     // 南壁臂高
+  /* 东壁外缘两角：以折缝后角点为原点，沿折缝取 a、垂直折缝取 h */
+  const aOf = wz => -st * (-yB) + ct * wz;
+  const hOf = wz => Math.sqrt(xi * xi + yB * yB + wz * wz - aOf(wz) * aOf(wz));
+  const a0 = aOf(-zi), h0 = hOf(-zi);            // 底环后缘角
+  const a1 = aOf(th + zi), h1 = hOf(th + zi);    // 底环前缘角
+  const hMax = Math.max(h0, h1);                 // 东/西壁最外点
+  const offX = hMax, offY = hN;                  // 纸样 (0,0) 在画布中的位置
+  const wU = tw + 2 * hMax, hU = hN + L + hS;
   return {
-    tw, th, ch, yB, yF, xi, gap,
-    zBt: gap + zi,                   // 顶面后缘的局部 z（自底环后缘内收 zi）
-    eB: zi,                          // 底环后缘相对顶面后缘的外扩量
-    eF: zi,                          // 底环前缘相对顶面前缘的外扩量
-    NW: Math.max(8, Math.round((ch + tw + ch) * PXU)),
-    NH: Math.max(8, Math.round((yB + th + yF) * PXU))
+    tw, th, ch, yB, yF, xi, zi, gap, ct, st, L, hN, hS, a0, a1, h0, h1,
+    zBt: gap + zi,                 // 顶面后缘的局部 z（自底环后缘内收 zi）
+    offX, offY,                    // 顶面纸样原点在画布中的位置
+    topX: offX, topY: offY,
+    wU, hU,                        // 纸样包围盒（u）
+    NW: Math.max(8, Math.round(wU * PXU)),
+    NH: Math.max(8, Math.round(hU * PXU))
   };
+}
+
+/* ---------- 展开映射（纸样坐标，u 单位） ----------
+ * 坐标轴：x 向东（画布右）、y 向南（画布下）。
+ * 顶面占 [offX, offX+tw] × [offY, offY+L]；四壁的折缝（v = 1）与顶面四缘逐点
+ * 重合，底缘（v = 0）落在裙边底环上。
+ * "壁面摊平"= 绕折缝旋转：到折缝的距离取真实垂距、沿折缝的位置取真实位置，
+ * 因此顶面有坡度时东/西壁必然是斜的楔形。顶面凹面不参与纸样（只在 3D 里起伏），
+ * 故折缝上的点按"去掉凹面"的高度展开，保证折缝两侧图案严格连续。
+ * 3D 几何的 UV 与"取模预览"的纸样轮廓都由这里生成。 */
+function makeNetMap(k, dims) {
+  const { ct, st, tw, L, yB, xi } = dims;
+  const x2 = xi * xi;
+  const bx0 = dims.gap, bx1 = k.w - dims.gap;        // 底环（裙边底缘）
+  const bz0 = dims.gap, bz1 = k.h - dims.gap;
+  const tx0 = bx0 + dims.xi, tx1 = bx1 - dims.xi;    // 顶环（顶面四缘）
+  const tz0 = dims.zBt, tz1 = tz0 + dims.th;
+  const { offX, offY, hN, hS } = dims;
+  const m = {
+    bx0, bx1, bz0, bz1, tx0, tx1, tz0, tz1, L,
+    x: x => offX + x - tx0,               // 顶面世界 x → 纸样 x
+    z: z => offY + (z - tz0) / ct,        // 顶面世界 z → 纸样 y（按坡度真实边长）
+    /* 壁面角点：face 0北 1东 2南 3西；t 为壁横向坐标（北/南壁取 x，东/西壁取 z），
+       v = 1 折缝（贴顶面） / v = 0 底缘 */
+    wall: (face, t, v) => {
+      if (face === 0) return [offX + t - tx0, v ? offY : offY - hN];
+      if (face === 2) return [offX + t - tx0, v ? offY + L : offY + L + hS];
+      const wz = t - tz0;                 // 底环点相对顶面后缘的 z
+      /* 折缝：与顶面左右缘逐点重合（沿坡度的真实边长） */
+      if (v) return [face === 1 ? offX + tw : offX, offY + wz / ct];
+      const a = -st * (-yB) + ct * wz;    // 沿折缝（自折缝后角点起算）
+      const h = Math.sqrt(x2 + yB * yB + wz * wz - a * a);   // 垂直折缝
+      return [face === 1 ? offX + tw + h : offX - h, offY + a];
+    }
+  };
+  /* 各面在纸样上的四边形（u，扁平数组）：顶面 + 北/东/南/西壁，
+     与上面 UV 采样到的区域完全一致 */
+  m.polys = () => [
+    [m.x(tx0), m.z(tz0), m.x(tx1), m.z(tz0), m.x(tx1), m.z(tz1), m.x(tx0), m.z(tz1)],
+    [...m.wall(0, bx0, 0), ...m.wall(0, bx1, 0), ...m.wall(0, tx1, 1), ...m.wall(0, tx0, 1)],
+    [...m.wall(1, tz0, 1), ...m.wall(1, tz1, 1), ...m.wall(1, bz1, 0), ...m.wall(1, bz0, 0)],
+    [...m.wall(2, tx0, 1), ...m.wall(2, tx1, 1), ...m.wall(2, bx1, 0), ...m.wall(2, bx0, 0)],
+    [...m.wall(3, tz0, 1), ...m.wall(3, tz1, 1), ...m.wall(3, bz1, 0), ...m.wall(3, bz0, 0)]
+  ];
+  return m;
+}
+
+/* ---------- 纸样（取模预览用）：展开尺寸 + 各面轮廓 ---------- */
+function netOutline(k, rowP) {
+  const dims = netDims(k, rowP);
+  return { dims, polys: makeNetMap(k, dims).polys() };
 }
 
 /* ---------- 顶面凹面（KeyV2 dish） ----------
@@ -149,9 +218,10 @@ function drawNetCanvas(cv, dims, d, k, getImg) {
   g.fillRect(0, NH, NW, BP);
 
   const S = PXU;
-  const tx = dims.ch * S, ty = dims.yB * S, tw = dims.tw * S, th = dims.th * S;
+  /* 顶面在纸样画布中的矩形：图片/图例/光影都以它为基准 */
+  const tx = dims.topX * S, ty = dims.topY * S, tw = dims.tw * S, th = dims.L * S;
 
-  /* 图片：cover 以顶面为基准；wrap=net 时不裁剪，铺满整张展开图包住四壁 */
+  /* 图片：cover 以顶面纸样矩形为基准；wrap=net 时不裁剪，越出部分自然包住四壁 */
   const img = d && d.img && d.img.data ? getImg(d.img.data) : null;
   if (img && img.complete && img.naturalWidth > 0) {
     const wrapNet = d.img.wrap === "net";
@@ -192,23 +262,24 @@ function drawNetCanvas(cv, dims, d, k, getImg) {
  * 横截面按真实键帽：底环内缩 gap，顶面再按 xi/zi 内缩 —— 四壁统一向里收分，
  * 裙边自底环一条直线直达顶环，不在中途折出台阶
  * 顶面与四壁上缘共用同一凹面函数，网格在折缝处闭合
- * UV 直接映射到展开图画布区域：
- *   顶面 → 顶面矩形；四壁 → 各壁条带（折叠翻转/转置在 UV 中完成）；
+ * UV 直接映射到纸样画布：
+ *   顶面 → 顶面矩形；四壁 → 各自绕折缝摊平后的四边形（东/西壁因顶面坡度是斜楔形）；
  *   底面 → 画布底部色条
  * 壁面 UV 约定：t 沿壁横向（北/南为 x，东/西为 z），
  *               v=0 底缘 / v=1 折缝（与顶面相邻）                    */
 function capGeometry(k, params, dims) {
-  const w = k.w, hh = k.h, ch = params.h;
-  const yB = dims.yB, yF = dims.yF, tw = dims.tw, th = dims.th;
+  const ch = params.h;
+  const tw = dims.tw, th = dims.th;
   const pos = [], uvs = [];
   const S = PXU;
   const U = px => px / dims.NW;
   const V = py => 1 - py / (dims.NH + BP);
 
-  /* 两个环：底环（y=0，内缩 gap）→ 顶环（内缩 xi/zi，高度由倾角与凹面决定） */
-  const bx0 = dims.gap, bx1 = w - dims.gap, bz0 = dims.gap, bz1 = hh - dims.gap;
-  const tx0 = bx0 + dims.xi, tx1 = bx1 - dims.xi;
-  const tz0 = dims.zBt, tz1 = dims.zBt + th;
+  /* 两个环：底环（y=0，内缩 gap）→ 顶环（内缩 xi/zi，高度由倾角与凹面决定）
+     环尺寸取自展开映射，与取模预览共用同一份定义 */
+  const nm = makeNetMap(k, dims);
+  const bx0 = nm.bx0, bx1 = nm.bx1, bz0 = nm.bz0, bz1 = nm.bz1;
+  const tx0 = nm.tx0, tx1 = nm.tx1, tz0 = nm.tz0, tz1 = nm.tz1;
   const xc = (tx0 + tx1) / 2, zc = (tz0 + tz1) / 2;
   const tan = Math.tan(params.tilt || 0);
   const dish = makeDish(params.dish, tw, th);
@@ -221,27 +292,13 @@ function capGeometry(k, params, dims) {
   const NX = Math.max(4, Math.min(48, Math.round(tw * 20)));
   const NZ = Math.max(4, Math.min(48, Math.round(th * 20)));
 
-  /* 四壁 UV：face 0北 1东 2南 3西 */
-  function wUV(face, t, v) {
-    let nx, ny;
-    if (face === 0) {          // 北：折缝在区域下缘
-      nx = (dims.ch + t - tx0) * S;
-      ny = v * dims.yB * S;
-    } else if (face === 1) {   // 东：竖条，折缝在左缘（转置）
-      nx = (dims.ch + dims.tw + (1 - v) * dims.ch) * S;
-      ny = (dims.yB + t - tz0) * S;
-    } else if (face === 2) {   // 南：折缝在区域上缘
-      nx = (dims.ch + t - tx0) * S;
-      ny = (dims.yB + dims.th + (1 - v) * dims.yF) * S;
-    } else {                   // 西：竖条，折缝在右缘（反向转置闭合）
-      nx = v * dims.ch * S;
-      ny = (dims.yB + tz1 - t) * S;
-    }
-    return [U(nx), V(ny)];
-  }
-  function tUV(x, z) {         // 顶面：后缘（z = tz0）为纹理上缘
-    return [U((dims.ch + x - tx0) * S), V((dims.yB + z - tz0) * S)];
-  }
+  /* 四壁 UV：face 0北 1东 2南 3西（映射与纸样轮廓同源，折缝两侧图案连续） */
+  const wUV = (face, t, v) => {
+    const p = nm.wall(face, t, v);
+    return [U(p[0] * S), V(p[1] * S)];
+  };
+  const tUV = (x, z) =>        // 顶面：后缘（z = tz0）为纹理上缘
+    [U(nm.x(x) * S), V(nm.z(z) * S)];
   const bUV = [U(1), V(dims.NH + BP / 2)];
 
   function quad(n, a, b, c, d, ua, ub, uc, ud) {
@@ -640,8 +697,8 @@ class View {
   getNetLayout() {
     const c = this.single ? this._singleCap : this.caps[this.selected];
     if (!c) return null;
-    const { ch, yB, tw, th } = c.dims;
-    return { px: PXU, ch: ch * PXU, kh: c.k.h * PXU, topX: ch * PXU, topY: yB * PXU, topW: tw * PXU, topH: th * PXU };
+    const d = c.dims;
+    return { px: PXU, L: d.L * PXU, kh: c.k.h * PXU, topX: d.topX * PXU, topY: d.topY * PXU, topW: d.tw * PXU, topH: d.L * PXU };
   }
 
   /* 像素比上限 1.75：高 DPI 下填充率减半，肉眼无感差异 */
@@ -786,5 +843,5 @@ function createSingleView(canvas, opts = {}) {
   return v;
 }
 
-window.Preview3D = { createBoardView, createSingleView, netDims };
+window.Preview3D = { createBoardView, createSingleView, netDims, netOutline };
 })();
