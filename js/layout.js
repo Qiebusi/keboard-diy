@@ -100,29 +100,28 @@ function layoutBounds(keys) {
  * 横截面参数（mm，均为每侧值）：
  *   gap  底面相对键位格的内缩（相邻键帽之间的缝隙）
  *   xi   顶面相对底面的内缩（左右方向）
- *   zi   顶面相对底面的内缩（前后方向）
- *   skew 顶面整体后移量 —— 原厂后壁近垂直、前壁大幅内收即由此而来
+ *   zi   顶面相对底面的内缩（前后方向，四壁统一向内收分）
  *   dish 顶面凹面：cyl 圆柱（Cherry / OEM，只左右弯曲）/ sph 球面（SA / DSA）
  * ========================================================= */
 const KEYCAP_PROFILES = {
   oem: {
-    label: "OEM（标准）", gap: 0.5, xi: 2.9, zi: 2.0, skew: 1.75, dish: { type: "cyl", depth: 1.0 },
+    label: "OEM（标准）", gap: 0.5, xi: 2.9, zi: 2.0, dish: { type: "cyl", depth: 1.0 },
     f: [11.2, 3], rows: [[9.45, -1], [9.0, -6], [9.25, -9], [9.25, -10], [9.25, -10]], space: [9.25, 0]
   },
   cherry: {
-    label: "Cherry（原厂）", gap: 0.445, xi: 3.155, zi: 1.76, skew: 2.0, dish: { type: "cyl", depth: 0.65 },
+    label: "Cherry（原厂）", gap: 0.445, xi: 3.155, zi: 1.76, dish: { type: "cyl", depth: 0.65 },
     f: [9.8, 0], rows: [[9.8, 0], [7.45, -2.5], [6.55, -5], [7.35, -11.5], [7.35, -11.5]], space: [7.35, 0]
   },
   sa: {
-    label: "SA（球帽）", gap: 0.325, xi: 2.85, zi: 2.85, skew: 0, dish: { type: "sph", depth: 0.85 },
+    label: "SA（球帽）", gap: 0.325, xi: 2.85, zi: 2.85, dish: { type: "sph", depth: 0.85 },
     f: [14.89, 13], rows: [[14.89, 13], [12.925, 7], [12.5, 0], [12.925, -7], [12.5, 0]], space: [12.5, 0]
   },
   dsa: {
-    label: "DSA（等高）", gap: 0.405, xi: 3.0, zi: 3.0, skew: 0, dish: { type: "sph", depth: 1.2 },
+    label: "DSA（等高）", gap: 0.405, xi: 3.0, zi: 3.0, dish: { type: "sph", depth: 1.2 },
     f: [8.1, 0], rows: [[8.1, 0], [8.1, 0], [8.1, 0], [8.1, 0], [8.1, 0]], space: [8.1, 0]
   },
   xda: {
-    label: "XDA（等高）", gap: 0.325, xi: 2.381, zi: 2.381, skew: 0, dish: null,
+    label: "XDA（等高）", gap: 0.325, xi: 2.381, zi: 2.381, dish: null,
     f: [8.4, 0], rows: [[8.4, 0], [8.4, 0], [8.4, 0], [8.4, 0], [8.4, 0]], space: [8.4, 0]
   }
 };
@@ -142,7 +141,7 @@ function keycapProfileFor(k, hasFRow, profileName) {
   const u = mm => mm / MM_PER_U;
   return {
     h: u(r[0]), tilt: r[1] * Math.PI / 180,
-    gap: u(P.gap), xi: u(P.xi), zi: u(P.zi), skew: u(P.skew),
+    gap: u(P.gap), xi: u(P.xi), zi: u(P.zi),
     dish: P.dish ? { type: P.dish.type, depth: u(P.dish.depth) } : null
   };
 }

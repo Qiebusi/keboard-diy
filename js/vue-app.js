@@ -381,7 +381,7 @@
         const show = !!(d && d.img && d.img.wrap === "net") && i != null;
         if (!show) return;
 
-        /* 真实展开尺寸（u）：底面 gap 内缩、顶面 xi/zi 内缩并后移 skew、分排倾角 */
+        /* 真实展开尺寸（u）：底环内缩 gap、顶面再按 xi/zi 内缩，四壁统一向里收分 */
         const k = state.keys[i];
         const prof = keycapProfileFor(k, layoutBounds(state.keys).H >= 5.9, state.profile);
         const dims = Preview3D.netDims(k, prof);
