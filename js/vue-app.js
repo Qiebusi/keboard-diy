@@ -125,6 +125,15 @@
       const imgWrapShown = computed(() =>
         (curDesign.value && curDesign.value.img && curDesign.value.img.wrap === "net") ? "net" : "top");
 
+      /* 平面视图的横截面参数：与 3D 共用同一套档案数据（gap / xi / zi，u 单位），
+         gap/xi/zi 只跟档案有关、与排无关，故取任意一键即可 */
+      function flatInsets() {
+        const k = state.keys[0];
+        if (!k) return null;
+        const p = keycapProfileFor(k, layoutBounds(state.keys).H >= 5.9, state.profile);
+        return { gap: p.gap, xi: p.xi, zi: p.zi };
+      }
+
       /* ================= 基础动作 ================= */
       function toast(msg) {
         toastMsg.value = msg;
@@ -282,6 +291,7 @@
           ctx.translate(PAD, PAD);
           Render.drawBoard(ctx, state.keys, state.designs, {
             U,
+            ins: flatInsets(),
             plateColor: state.plateColor,
             selectedIndex: state.selected,
             hoverIndex: state.hover,
@@ -573,7 +583,7 @@
         const c = cv.getContext("2d");
         c.translate(pad, pad);
         Render.drawBoard(c, state.keys, state.designs, {
-          U: eu, plateColor: state.plateColor, getImg, exportMode: true
+          U: eu, ins: flatInsets(), plateColor: state.plateColor, getImg, exportMode: true
         });
         downloadURL(cv.toDataURL("image/png"), `keycap-board-${state.keys.length}keys.png`);
         toast("整盘 PNG 已导出");
@@ -589,7 +599,7 @@
         cv.height = k.h * eu + pad * 2;
         const c = cv.getContext("2d");
         c.translate(pad, pad);
-        Render.drawKey(c, k, state.designs[i], { U: eu, getImg, exportMode: true });
+        Render.drawKey(c, k, state.designs[i], { U: eu, ins: flatInsets(), getImg, exportMode: true });
         const name = (k.label || "space").replace(/[\\/:*?"<>|]/g, "_");
         downloadURL(cv.toDataURL("image/png"), `keycap-${name}-${k.w}u.png`);
         toast("键帽 PNG 已导出");
@@ -713,7 +723,7 @@
             lastPos = { x: px, y: py };
             const d = state.designs[state.selected];
             if (d && d.img) {
-              const g = Render.capGeom(state.keys[state.selected], U);
+              const g = Render.capGeom(state.keys[state.selected], U, flatInsets());
               d.img.ox = clamp((d.img.ox || 0) + dx / g.tw, -1.5, 1.5);
               d.img.oy = clamp((d.img.oy || 0) + dy / g.th, -1.5, 1.5);
               dragMoved = true;
