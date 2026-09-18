@@ -102,7 +102,8 @@ const Render = (() => {
        收分量左右 = xi、后 = zB、前 = zF，三者不等量，所以棱线不是 45°。
        起止点取圆角 45° 处的点（0.2929×半径），保证整条线都落在图形内 */
     ctx.save();
-    ctx.strokeStyle = shade(bg, -66);
+    /* 连接线用白色：画在深色裙边上像一道高光棱线，比深色更清晰 */
+    ctx.strokeStyle = "#ffffff";
     ctx.lineWidth = Math.max(1, U * 0.013);
     ctx.lineCap = "round";
     const K45 = 0.2929;
