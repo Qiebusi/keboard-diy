@@ -78,6 +78,7 @@ export class View {
     this.explode = false;          // 分层拆解开关（整盘视图）
     this.explodeGap = 1;           // 层间距倍数
     this._ex = 0;                  // 当前展开量 0..1（缓动插值）
+    this._lastSize = null;         // 最近一次可用的画布尺寸（导出时画布若被隐藏用于兜底）
     this._stepWritten = -1;        // 上次写进矩阵的每层抬升量（用于层距改动即时生效）
     this._layerObjs = [];          // [物件, 原始矩阵, 层号]
     this._layerVis = null;         // 各层显示开关（null = 全显）
@@ -441,6 +442,7 @@ export class View {
     let resized = false;
     const cw = this.canvas.clientWidth, chh = this.canvas.clientHeight;
     if (cw > 4 && chh > 4) {
+      this._lastSize = [cw, chh];          // 记下可用尺寸，供导出时画布被隐藏的情况兜底
       const dpr = this._dpr();
       if (this.canvas.width !== Math.round(cw * dpr) || this.canvas.height !== Math.round(chh * dpr)) {
         this.renderer.setPixelRatio(dpr);
@@ -450,11 +452,16 @@ export class View {
         resized = true;
       }
     }
+    this._placeCamera();
+    return resized;
+  }
 
+  /* 只摆相机（不动画布尺寸）：渲染循环与导出共用 */
+  _placeCamera() {
     let target, radius;
     if (this.single) {
       const k = this._targetKey;
-      if (!k) return resized;
+      if (!k) return;
       target = new THREE.Vector3(k.w / 2, FLOAT + 0.15, k.h / 2);
       radius = 0.62 * Math.hypot(k.w, k.h) + 0.9;
     } else {
@@ -471,7 +478,6 @@ export class View {
       target.z + dist * Math.cos(yaw) * Math.cos(elev)
     );
     this.camera.lookAt(target);
-    return resized;
   }
 
   _frame() {
@@ -548,22 +554,41 @@ export class View {
     return hits.length ? hits[0].object.userData.index : null;
   }
 
-  /* ----- 高清导出 ----- */
-  snapshot(scale = 2) {
-    const w = this.canvas.clientWidth, h = this.canvas.clientHeight;
+  /* ----- 高清导出 -----
+     scale：倍率；minPx：导出图长边的最小像素（画布本身可能很小，比如单键卡片
+     只有一百多像素，这时按比例放大渲染，导出才是高清图）。
+     画布被 v-show 隐藏时 clientWidth 为 0，此时用上次记录的可用尺寸兜底，
+     否则会 setSize(0,0) —— 既导不出东西，还会把画布弄坏。 */
+  snapshot(scale = 2, minPx = 0) {
+    let w = this.canvas.clientWidth, h = this.canvas.clientHeight;
+    if (w < 2 || h < 2) {
+      const ls = this._lastSize;
+      w = (ls && ls[0]) || 480;
+      h = (ls && ls[1]) || 320;
+    }
+    const s = minPx > 0 ? Math.max(scale, minPx / Math.max(w, h)) : scale;
+    const W = Math.max(4, Math.round(w * s)), H = Math.max(4, Math.round(h * s));
+
+    /* 临时按导出尺寸渲染一帧（不走 _updateCamera：它会按 DPR 把尺寸改回去） */
     this.renderer.setPixelRatio(1);
-    this.renderer.setSize(w * scale, h * scale, false);
-    this.camera.aspect = w / h;
+    this.renderer.setSize(W, H, false);
+    this.camera.aspect = W / H;
     this.camera.updateProjectionMatrix();
     this._refreshCaps();
-    this._updateCamera();
+    this._placeCamera();
     this.renderer.render(this.scene, this.camera);
     const url = this.canvas.toDataURL("image/png");
-    this.renderer.setPixelRatio(this._dpr());
-    this.renderer.setSize(w, h, false);
-    this.camera.aspect = w / h;
-    this.camera.updateProjectionMatrix();
-    this.renderer.render(this.scene, this.camera);
+
+    /* 还原到正常显示尺寸（画布隐藏时保持导出尺寸，别设成 0） */
+    const cw = this.canvas.clientWidth, chh = this.canvas.clientHeight;
+    if (cw > 4 && chh > 4) {
+      this.renderer.setPixelRatio(this._dpr());
+      this.renderer.setSize(cw, chh, false);
+      this.camera.aspect = cw / chh;
+      this.camera.updateProjectionMatrix();
+      this.renderer.render(this.scene, this.camera);
+    }
+    this._needsRender = true;
     return url;
   }
 }

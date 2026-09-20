@@ -642,7 +642,10 @@ export function useStudio() {
     cv.height = k.h * eu + pad * 2;
     const c = cv.getContext("2d");
     c.translate(pad, pad);
-    Render.drawKey(c, k, state.designs[i], { U: eu, ins: flatInsets(), getImg, exportMode: true });
+    /* drawKey 按世界坐标绘制（键位 x/y × U）：单键画布只有一颗键那么大，
+       必须把该键挪到原点，否则会画到画布外，导出成一张全透明空图 */
+    Render.drawKey(c, { ...k, x: 0, y: 0 }, state.designs[i],
+      { U: eu, ins: flatInsets(), getImg, exportMode: true });
     const name = (k.label || "space").replace(/[\\/:*?"<>|]/g, "_");
     downloadURL(cv.toDataURL("image/png"), `keycap-${name}-${k.w}u.png`);
     toast("键帽 PNG 已导出");
@@ -652,7 +655,8 @@ export function useStudio() {
     if (state.selected == null || !singleView) { toast("请先选中一个键帽"); return; }
     const k = state.keys[state.selected];
     const name = (k.label || "space").replace(/[\\/:*?"<>|]/g, "_");
-    downloadURL(singleView.snapshot(2), `keycap-3d-${name}.png`);
+    /* 单键卡片画布只有一百多像素，按长边 ≥1024 放大渲染，导出才是高清图 */
+    downloadURL(singleView.snapshot(2, 1024), `keycap-3d-${name}.png`);
     toast("单键 3D PNG 已导出");
   }
 
