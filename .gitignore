@@ -1,2 +1,6 @@
-.playwright-cli
-*.png
+node_modules/
+dist/
+*.log
+.DS_Store
+.vite/
+.playwright-cli/

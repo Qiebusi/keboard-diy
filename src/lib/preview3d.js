@@ -18,11 +18,9 @@
  *   - 键帽/底板矩阵冻结（静态物件）
  * ========================================================= */
 
-(() => {
-if (!window.THREE) {
-  console.warn("[KeycapStudio] three.min.js 未加载，3D 预览不可用");
-  return;
-}
+import * as THREE from "three";
+import { keycapProfileFor, layoutBounds } from "./layout.js";
+import { Render } from "./render.js";
 
 const PXU = 200;           // 纹理分辨率（px / u）
 const FOV = 40;
@@ -1530,5 +1528,4 @@ function createSingleView(canvas, opts = {}) {
   return v;
 }
 
-window.Preview3D = { createBoardView, createSingleView, netDims, netOutline };
-})();
+export { createBoardView, createSingleView, netDims, netOutline };

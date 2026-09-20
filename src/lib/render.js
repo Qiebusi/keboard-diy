@@ -4,6 +4,8 @@
  * - 高键（h:2）顶面按同比例内缩，视觉符合实物
  * ========================================================= */
 
+import { layoutBounds } from "./layout.js";
+
 const Render = (() => {
 
   function roundRectPath(ctx, x, y, w, h, r) {
@@ -222,3 +224,5 @@ const Render = (() => {
 
   return { drawKey, drawBoard, capGeom, shade, luminance, roundRectPath };
 })();
+
+export { Render };

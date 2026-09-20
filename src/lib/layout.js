@@ -157,3 +157,8 @@ function keycapProfileFor(k, hasFRow, profileName) {
     dish: P.dish ? { type: P.dish.type, depth: u(P.dish.depth) } : null
   };
 }
+
+export {
+  KEYBOARD_LAYOUTS, KEYCAP_PROFILES, MM_PER_U,
+  parseKLE, getLayoutRows, layoutBounds, keycapProfileFor
+};

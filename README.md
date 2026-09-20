@@ -2,7 +2,36 @@
 
 一个纯前端的机械键盘**键帽设计与预览工具**。用户在键盘布局图上逐键设计键帽（底色、图例、图片贴图），可切换平面 / 3D 视图实时查看效果，并导出图片或保存工程文件。
 
-无需安装、无需联网，浏览器直接打开即用。
+纯前端，**Vite 5 + Vue 3 单文件组件**工程，构建产物是静态站点，可离线运行。
+
+---
+
+## 0. 运行与构建
+
+```bash
+npm install        # 安装依赖（vue@3.5 / three@0.147）
+npm run dev        # 开发服务器 http://127.0.0.1:5188
+npm run build      # 构建到 dist/
+npm run preview    # 本地预览 dist/
+```
+
+- 端口固定 **5188**（见 `vite.config.js`），避免与本机其它 dev server 撞端口；
+- 构建用相对路径（`base: "./"`），`dist/` 可直接丢到任意静态服务器或子目录；
+- `npm run dev` 时控制台会挂 `window.__studio`（状态 + 动作）与 `window.__dbv` / `window.__dbs`（3D 视图实例）便于调试，生产构建不暴露。
+
+### 项目结构
+
+| 路径 | 说明 |
+|---|---|
+| `index.html` | Vite 入口（只留挂载点） |
+| `src/main.js` | 应用入口：挂载 `App.vue` + 引入全局样式 |
+| `src/App.vue` | 根组件：整体布局，`provide("studio")` 下发状态 |
+| `src/components/` | 单文件组件：顶部栏、画布区、单键 3D 卡片、键帽 / 图片 / 快捷 / 全局 / 分层拆解卡片、放大层、toast |
+| `src/composables/useStudio.js` | 应用状态与全部交互动作（Composition API） |
+| `src/lib/layout.js` | 布局：KLE 解析、内置布局、键帽高度档案 |
+| `src/lib/render.js` | 平面（Canvas 2D）键帽渲染 |
+| `src/lib/preview3d.js` | 3D 预览（Three.js）：键帽几何、底盘、分层拆解 |
+| `src/styles/style.css` | 全局样式（两套主题） |
 
 ---
 
