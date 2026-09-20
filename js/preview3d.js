@@ -31,6 +31,58 @@ const BP = 6;              // 展开图画布底部预留色条高度（底面�
 const STEM = new THREE.Color(0x17181d);   // 轴体颜色
 const ACCENT = new THREE.Color(0xd9480f); // 选中强调色
 
+/* 真实 MX 轴体 / 定位板尺寸（mm → u，1u = 19.05mm）：
+   定位板上表面定在 y = 0；上盖 9.9×5.5、法兰填满 14mm 开孔、
+   十字外包 4.1mm、臂厚 1.17mm（Cherry 规格 14±0.05 / 4.1+0.05） */
+const MX = {
+  hole: 14.0 / 19.05,     // 定位板开孔
+  plateT: 1.5 / 19.05,    // 定位板厚
+  flange: 13.9 / 19.05,   // 穿过开孔的法兰（单边留 0.05 间隙）
+  upperW: 9.9 / 19.05,    // 上盖宽
+  upperH: 5.5 / 19.05,    // 上盖高（板面以上）
+  cross: 4.1 / 19.05,     // 十字外包尺寸
+  arm: 1.17 / 19.05,      // 十字臂厚
+  crossH: 3.0 / 19.05     // 十字露出高度
+};
+const MX_Y = {            // 轴体各件中心高度（u）—— 下壳中心见下方 LOWER_H
+  housing: MX.upperH / 2,
+  stem: MX.upperH + MX.crossH / 2
+};
+/* 其余底盘件的参考尺寸（mm → u）：
+   PCB 厚 1.6（FR4 标准）、定位板下沿到 PCB 面 5.0（常见设计值）；
+   卫星轴距轴心 11.938（Cherry 规格）、钢丝 Ø1.6、定位板过孔按轴心 4.1 单边留 0.45；
+   热插拔轴座 ≈10.5×5.5×3.2（卧贴常见体型，按简化体建）；
+   USB-C 插座口 8.34×2.56（USB 规范）、面板开孔常用 9.0×3.3；
+   脚垫 20×10×2、脚撑两级 7°/0° —— 取自开源套件 PH60（ph-design/PH60）的 BOM。 */
+const REF = {
+  pcbT: 1.6 / 19.05,
+  pcbGap: 5.0 / 19.05,
+  socket: [10.5 / 19.05, 5.5 / 19.05, 3.2 / 19.05],
+  stabX: 11.938 / 19.05,
+  stabHole: 5.0 / 19.05,
+  wire: 1.6 / 19.05,
+  /* USB-C 母座：外形 8.94×3.16（圆角 R1.5）、口内 8.34×2.56、
+     舌片厚 0.65、插入深度 6.65 —— 取自连接器厂商规格表 */
+  usbShell: [8.94 / 19.05, 3.16 / 19.05, 1.5 / 19.05],
+  usbMouth: [8.34 / 19.05, 2.56 / 19.05, 1.2 / 19.05],
+  usbTongue: [6.5 / 19.05, 0.65 / 19.05]
+};
+const PCB_Y = -(MX.plateT + REF.pcbGap);   // PCB 上表面（板面下 6.5mm）
+const LOWER_H = -PCB_Y;                    // 轴体下壳高（板下沿 → PCB 面，6.5mm）
+MX_Y.flange = -LOWER_H / 2;                // 轴体下壳中心
+const CASE_BOT = -0.72;                    // 下壳底面（要容下 PCB + 轴座）
+const CASE_LIP = 8.0 / 19.05;              // 上盖高出板面的量（高边框：键帽下半截落在里面）
+const CASE_R = 0.16;                       // 外壳四角圆角（≈3mm）
+const SEAM = 0.02;                         // 上/下壳分模线的错台量
+const TOP_BOT = -0.157;                    // 上盖底面（分模线位置，板面下 3mm）
+const INNER_GAP = 1.2 / 19.05;             // 键位区到外壳内壁的间隙
+const PLATE_PM = 3.6 / 19.05;              // 定位板外扩量（要小于下壳内腔半径 3.9mm）
+const PLATE_SLOT = PLATE_PM + 0.1 / 19.05; // 定位板在壳里那圈卡槽的内口（比板大 0.1）
+const WALL_T = 2.4 / 19.05;                // 下壳壁厚
+const PCUT = [9.2 / 19.05, 3.4 / 19.05, 1.7 / 19.05];  // 后壁 USB-C 开孔（母座 8.94×3.16 留 0.13 单边）
+const CASE_ANG = 6 * Math.PI / 180;        // 外壳底面斜坡角度（后面高，键帽面保持水平）
+const CASE_K = Math.tan(CASE_ANG);         // 位移系数：正号 = 后面（小 z）压低 → 后面更高
+
 /* 键帽纹理：禁 mipmap + 线性过滤（NPOT 画布必需；mipmap 会采样到陈旧链层） */
 function makeCapTexture(cv) {
   const t = new THREE.CanvasTexture(cv);
@@ -218,7 +270,7 @@ function drawNetCanvas(cv, dims, d, k, getImg) {
   g.clearRect(0, 0, NW, NH + BP);
   g.fillStyle = bg;
   g.fillRect(0, 0, NW, NH + BP);
-  g.fillStyle = Render.shade(bg, -58);          // 底面（深一档）
+  g.fillStyle = Render.shade(bg, -12);          // 底面（帽身同色，只压一点点暗）
   g.fillRect(0, NH, NW, BP);
 
   const S = PXU;
@@ -272,7 +324,7 @@ function drawNetCanvas(cv, dims, d, k, getImg) {
  *   底面 → 画布底部色条
  * 壁面 UV 约定：t 沿壁横向（北/南为 x，东/西为 z），
  *               v=0 底缘 / v=1 折缝（与顶面相邻）                    */
-function capGeometry(k, params, dims) {
+function capGeometry(k, params, dims, withSocket) {
   const ch = params.h;
   const tw = dims.tw, th = dims.th;
   const pos = [], uvs = [];
@@ -356,8 +408,115 @@ function capGeometry(k, params, dims) {
       wUV(3, za0, 0), wUV(3, za1, 0), wUV(3, zt1, 1), wUV(3, zt0, 1));
   }
 
-  /* 底面（防止低角度看穿裙边） */
-  quad([0, -1, 0], [bx0, 0, bz0], [bx0, 0, bz1], [bx1, 0, bz1], [bx1, 0, bz0], bUV, bUV, bUV, bUV);
+  /* ---------- 内壳：真键帽是空腔壳体，顶/壁/底缘都有厚度 ---------- */
+  const WT = 1.5 / 19.05;                       // 侧壁厚（ABS 行业标准 1.5mm）
+  const TT = 1.5 / 19.05;                       // 顶面厚
+  const ix0 = bx0 + WT, ix1 = bx1 - WT, iz0 = bz0 + WT, iz1 = bz1 - WT;     // 内腔底环
+  const itx0 = tx0 + WT, itx1 = tx1 - WT, itz0 = tz0 + WT, itz1 = tz1 - WT; // 内顶环
+
+  /* 底缘（帽壁断面）：外底环 → 内腔底环 */
+  quad([0, -1, 0], [bx0, 0, bz0], [bx0, 0, bz1], [ix0, 0, iz1], [ix0, 0, iz0], bUV, bUV, bUV, bUV);
+  quad([0, -1, 0], [ix1, 0, iz0], [ix1, 0, iz1], [bx1, 0, bz1], [bx1, 0, bz0], bUV, bUV, bUV, bUV);
+  quad([0, -1, 0], [ix0, 0, iz0], [ix1, 0, iz0], [bx1, 0, bz0], [bx0, 0, bz0], bUV, bUV, bUV, bUV);
+  quad([0, -1, 0], [bx0, 0, bz1], [bx1, 0, bz1], [ix1, 0, iz1], [ix0, 0, iz1], bUV, bUV, bUV, bUV);
+
+  /* 内壁：外壁四片向腔内缩进 WT，上缘接内顶 */
+  for (let i = 0; i < NX; i++) {
+    const s0 = i / NX, s1 = (i + 1) / NX;
+    const xa0 = lerp(ix0, ix1, s0), xa1 = lerp(ix0, ix1, s1);
+    const xt0 = lerp(itx0, itx1, s0), xt1 = lerp(itx0, itx1, s1);
+    quad([0, 0, 1], [xa0, 0, iz0], [xa1, 0, iz0],
+      [xt1, topY(xt1, itz0) - TT, itz0], [xt0, topY(xt0, itz0) - TT, itz0], bUV, bUV, bUV, bUV);
+    quad([0, 0, -1], [xa0, 0, iz1], [xa1, 0, iz1],
+      [xt1, topY(xt1, itz1) - TT, itz1], [xt0, topY(xt0, itz1) - TT, itz1], bUV, bUV, bUV, bUV);
+  }
+  for (let i = 0; i < NZ; i++) {
+    const s0 = i / NZ, s1 = (i + 1) / NZ;
+    const za0 = lerp(iz0, iz1, s0), za1 = lerp(iz0, iz1, s1);
+    const zt0 = lerp(itz0, itz1, s0), zt1 = lerp(itz0, itz1, s1);
+    quad([1, 0, 0], [ix0, 0, za0], [ix0, 0, za1],
+      [itx0, topY(itx0, zt1) - TT, zt1], [itx0, topY(itx0, zt0) - TT, zt0], bUV, bUV, bUV, bUV);
+    quad([-1, 0, 0], [ix1, 0, za0], [ix1, 0, za1],
+      [itx1, topY(itx1, zt1) - TT, zt1], [itx1, topY(itx1, zt0) - TT, zt0], bUV, bUV, bUV, bUV);
+  }
+
+  /* 内顶：外顶网格整体下移 TT（腔体天花，法线朝下） */
+  for (let i = 0; i < NX; i++) for (let j = 0; j < NZ; j++) {
+    const xa = lerp(itx0, itx1, i / NX), xb = lerp(itx0, itx1, (i + 1) / NX);
+    const za = lerp(itz0, itz1, j / NZ), zb = lerp(itz0, itz1, (j + 1) / NZ);
+    quad([0, -1, 0],
+      [xa, topY(xa, za) - TT, za], [xb, topY(xb, za) - TT, za],
+      [xb, topY(xb, zb) - TT, zb], [xa, topY(xa, zb) - TT, zb],
+      bUV, bUV, bUV, bUV);
+  }
+
+  /* ---------- 轴心柱 + 十字插槽（底部可见；整盘视图里看不见，跳过） ----------
+   * 真实键帽轴心柱不止一个：窄键只有中心 1 个；大键按卫星轴位置加副轴柱；
+   * 空格键（≥6u）是中心 + 左右各 1 个，距中心 2u（19.05×2 = 38.1mm）。 */
+  const bossRanges = [];
+  if (withSocket) {
+    const BR = 2.75 / 19.05;                    // 轴心柱半径（Ø5.5，常见值，未查到权威数据）
+    const SL = 2.05 / 19.05;                    // 十字臂半长（全长 4.1⁺⁰·⁰⁵，Deskthority wiki / SP 4.04）
+    const SW = 0.585 / 19.05;                   // 十字臂半宽（1.17±0.02，SP 1.19）
+    const SD = 5.0 / 19.05;                     // 插槽深（轴心十字高约 5mm）
+    const cx = (tx0 + tx1) / 2, cz = (tz0 + tz1) / 2;
+    const mounts = [[0, 0]];
+    /* 副轴柱与定位板/卫星轴同源：2u–6u 大键 ±11.938mm，空格按键长取值 */
+    for (const [sx, sz] of stabPositions(k)) {
+      mounts.push([sx - (k.x + k.w / 2), sz - (k.y + k.h / 2)]);
+    }
+
+    const drawSocket = (ox, oz) => {
+      const bx = cx + ox, bz = cz + oz;
+      const bh = Math.max(SD + 0.6 / 19.05, topY(bx, bz) - TT);   // 柱高：顶到腔内顶
+      const from = pos.length / 3;
+      /* 柱外壁：36 段，稍后单独给径向平滑法线（不然棱面感很重） */
+      for (let i = 0; i < 36; i++) {
+        const a0 = i / 36 * Math.PI * 2, a1 = (i + 1) / 36 * Math.PI * 2;
+        const c0 = Math.cos(a0), s0 = Math.sin(a0), c1 = Math.cos(a1), s1 = Math.sin(a1);
+        quad([c0, 0, s0],
+          [bx + BR * c0, 0, bz + BR * s0], [bx + BR * c1, 0, bz + BR * s1],
+          [bx + BR * c1, bh, bz + BR * s1], [bx + BR * c0, bh, bz + BR * s0],
+          bUV, bUV, bUV, bUV);
+      }
+      bossRanges.push([from, pos.length / 3, bx, bz]);
+      /* 柱底面：圆盘到十字轮廓的环（每象限 2 片 + 每臂端 1 片） */
+      const onArc = (x, z) => {
+        const L = Math.hypot(x, z) || 1;
+        return [bx + x / L * BR, bz + z / L * BR];
+      };
+      for (const sx of [1, -1]) for (const sz of [1, -1]) {
+        const x0 = SW * sx, z0 = SW * sz, x1 = SL * sx, z1 = SW * sz, x2 = SW * sx, z2 = SL * sz;
+        const a0 = onArc(x0, z0), a1 = onArc(x1, z1), a2 = onArc(x2, z2);
+        quad([0, -1, 0], [bx + x0, 0, bz + z0], [bx + x1, 0, bz + z1], [a1[0], 0, a1[1]], [a0[0], 0, a0[1]],
+          bUV, bUV, bUV, bUV);
+        quad([0, -1, 0], [bx + x0, 0, bz + z0], [a0[0], 0, a0[1]], [a2[0], 0, a2[1]], [bx + x2, 0, bz + z2],
+          bUV, bUV, bUV, bUV);
+        if (sz > 0) {   // 臂端区域（每个臂只算一次）
+          const t0 = onArc(SL * sx, -SW), t1 = onArc(SL * sx, SW);
+          quad([0, -1, 0], [bx + SL * sx, 0, bz - SW], [bx + SL * sx, 0, bz + SW],
+            [t1[0], 0, t1[1]], [t0[0], 0, t0[1]], bUV, bUV, bUV, bUV);
+        }
+      }
+      /* 十字插槽内壁（每臂 2 侧面 + 1 端面） */
+      const slotWall = (ax, az, ex, ez) => quad([0, 0, 0],
+        [bx + ax, 0, bz + az], [bx + ex, 0, bz + ez],
+        [bx + ex, SD, bz + ez], [bx + ax, SD, bz + az], bUV, bUV, bUV, bUV);
+      for (const s of [1, -1]) {
+        slotWall(SW * s, SW, SL * s, SW);  slotWall(SW * s, -SW, SL * s, -SW);  // 水平臂两侧
+        slotWall(SL * s, -SW, SL * s, SW);                                       // 水平臂端面
+        slotWall(SW, SW * s, SW, SL * s);  slotWall(-SW, SW * s, -SW, SL * s);   // 竖直臂两侧
+        slotWall(-SW, SL * s, SW, SL * s);                                       // 竖直臂端面
+      }
+      /* 槽底（十字形，5 片） */
+      quad([0, -1, 0], [bx - SW, SD, bz - SW], [bx + SW, SD, bz - SW], [bx + SW, SD, bz + SW], [bx - SW, SD, bz + SW], bUV, bUV, bUV, bUV);
+      for (const s of [1, -1]) {
+        quad([0, -1, 0], [bx + SW * s, SD, bz - SW], [bx + SL * s, SD, bz - SW], [bx + SL * s, SD, bz + SW], [bx + SW * s, SD, bz + SW], bUV, bUV, bUV, bUV);
+        quad([0, -1, 0], [bx - SW, SD, bz + SW * s], [bx + SW, SD, bz + SW * s], [bx + SW, SD, bz + SL * s], [bx - SW, SD, bz + SL * s], bUV, bUV, bUV, bUV);
+      }
+    };
+    for (const [ox, oz] of mounts) drawSocket(ox, oz);
+  }
 
   /* 顶面：网格化以承载凹面（圆柱 / 球面） */
   for (let i = 0; i < NX; i++) for (let j = 0; j < NZ; j++) {
@@ -372,7 +531,339 @@ function capGeometry(k, params, dims) {
   geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
   geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
   geo.computeVertexNormals();
+  /* 轴心柱外壁换成径向平滑法线：不然分段再多也还是棱面 */
+  if (bossRanges.length) {
+    const nrm = geo.attributes.normal;
+    for (const [from, to, bcx, bcz] of bossRanges) {
+      for (let i = from; i < to; i++) {
+        const dx = pos[i * 3] - bcx, dz = pos[i * 3 + 2] - bcz;
+        const L = Math.hypot(dx, dz) || 1;
+        nrm.setXYZ(i, dx / L, 0, dz / L);
+      }
+    }
+    nrm.needsUpdate = true;
+  }
   return geo;
+}
+
+/* ---------- 底盘：定位板 / PCB / 轴座 / 卫星轴 / 外壳 ----------
+ * 与键帽同一坐标系（板面 y = 0，厚度与外壳朝下），几何直接按世界坐标构建。
+ * 尺寸见文件开头的 MX / REF 表；形体按实物简化，位置与规格照参考值。 */
+function sqPath(x, z, half) {
+  const p = new THREE.Path();
+  p.moveTo(x - half, z - half);
+  p.lineTo(x + half, z - half);
+  p.lineTo(x + half, z + half);
+  p.lineTo(x - half, z + half);
+  p.closePath();
+  return p;
+}
+
+/* C 形环：外轮廓为圆角矩形、缺掉 z < zCut 那一段（后壁单独做），两端是平口。
+   用来做下壳的三面壁（前 + 左右）：x0/x1/z0/z1 为外轮廓，r 外圆角，t 壁厚 */
+function cRingShape(x0, z0, x1, z1, r, t, zCut) {
+  const p = new THREE.Shape();
+  const ri = r - t;
+  p.moveTo(x0, zCut);
+  p.lineTo(x0, z1 - r);
+  p.absarc(x0 + r, z1 - r, r, Math.PI, Math.PI / 2, true);
+  p.lineTo(x1 - r, z1);
+  p.absarc(x1 - r, z1 - r, r, Math.PI / 2, 0, true);
+  p.lineTo(x1, zCut);
+  p.lineTo(x1 - t, zCut);
+  p.lineTo(x1 - t, z1 - r);
+  p.absarc(x1 - r, z1 - r, ri, 0, Math.PI / 2, false);
+  p.lineTo(x0 + r, z1 - t);
+  p.absarc(x0 + r, z1 - r, ri, Math.PI / 2, Math.PI, false);
+  p.lineTo(x0 + t, zCut);
+  p.closePath();
+  return p;
+}
+
+/* 圆角矩形（外壳轮廓/内口都用它；p 传 new THREE.Shape() 或 new THREE.Path()） */
+function roundRectShape(x0, z0, x1, z1, r, p) {
+  const rr = Math.min(r, (x1 - x0) / 2, (z1 - z0) / 2);
+  p.moveTo(x0 + rr, z0);
+  p.lineTo(x1 - rr, z0);
+  p.absarc(x1 - rr, z0 + rr, rr, -Math.PI / 2, 0, false);
+  p.lineTo(x1, z1 - rr);
+  p.absarc(x1 - rr, z1 - rr, rr, 0, Math.PI / 2, false);
+  p.lineTo(x0 + rr, z1);
+  p.absarc(x0 + rr, z1 - rr, rr, Math.PI / 2, Math.PI, false);
+  p.lineTo(x0, z0 + rr);
+  p.absarc(x0 + rr, z0 + rr, rr, Math.PI, Math.PI * 1.5, false);
+  return p;
+}
+
+/* 长边 ≥2u 的大键才配卫星轴（1.75u 及以下没有）：
+   2u–6u 的大键：轴心两侧各 11.938mm（Cherry MX 标准偏移）；
+   空格（≥6u）：安装点按长度取 —— 6.25u = 100mm、7u = 114.3mm，
+   即安装点间距 = 100 + (w − 6.25) × 19.05，再取一半作为偏移。
+   竖向键沿 z 排，横向键沿 x 排。定位板、卫星轴、键帽副轴柱共用这一份坐标。 */
+function stabPositions(k) {
+  if (Math.max(k.w, k.h) < 2) return [];
+  const cx = k.x + k.w / 2, cz = k.y + k.h / 2;
+  const horiz = k.w >= k.h;
+  const span = horiz ? k.w : k.h;
+  /* 换算成 u：6.25u → 100mm/2 = 2.625u，7u → 114.3mm/2 = 3u */
+  const o = span >= 6 ? (100 / 19.05 + (span - 6.25)) / 2 : REF.stabX;
+  return horiz ? [[cx - o, cz], [cx + o, cz]] : [[cx, cz - o], [cx, cz + o]];
+}
+
+/* 铭牌贴图（只建一次） */
+let _badgeTex = null;
+function badgeTexture() {
+  if (_badgeTex) return _badgeTex;
+  const cv = document.createElement("canvas");
+  cv.width = 512; cv.height = 96;
+  const g = cv.getContext("2d");
+  g.fillStyle = "#191a1e";
+  g.fillRect(0, 0, cv.width, cv.height);
+  g.fillStyle = "#e9e5dd";
+  g.font = "600 44px Inter, 'Segoe UI', 'Microsoft YaHei', sans-serif";
+  g.textAlign = "center";
+  g.textBaseline = "middle";
+  g.fillText("KEYCAP STUDIO", cv.width / 2, cv.height / 2 + 2);
+  const t = new THREE.CanvasTexture(cv);
+  t.generateMipmaps = false;
+  _badgeTex = t;
+  return t;
+}
+
+/* ---------- 外壳底面斜坡 ----------
+ * 斜面就是**外壳底面**（贴地那面）：底面被斜切，越靠后外壳越高；
+ * 装键帽的那面（直角面，分模线以上）一点不动，保持方正水平。
+ * 位移场 y += k·(z − zMid)·w(y)：w 在分模线处为 0、往下线性升到底面为 1。 */
+function wedgeGeo(geo, o, oy = 0, oz = 0) {
+  const pos = geo.attributes.position;
+  const span = o.yTop - o.yBot;
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i) + oy;
+    const w = Math.min(1, Math.max(0, (o.yTop - y) / span));   // 分模线 0 → 底面 1
+    if (w <= 0) continue;
+    pos.setY(i, pos.getY(i) + o.k * (pos.getZ(i) + oz - o.zMid) * w);
+  }
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
+}
+
+/* 实例化网格（轴座）：每个实例按自己所在高度取位场，整体平移 */
+function wedgeInstances(im, o) {
+  const m = new THREE.Matrix4();
+  const p = new THREE.Vector3();
+  for (let i = 0; i < im.count; i++) {
+    im.getMatrixAt(i, m);
+    p.setFromMatrixPosition(m);
+    const w = Math.min(1, Math.max(0, (o.yTop - p.y) / (o.yTop - o.yBot)));
+    if (w <= 0) continue;
+    m.setPosition(p.x, p.y + o.k * (p.z - o.zMid) * w, p.z);
+    im.setMatrixAt(i, m);
+  }
+  im.instanceMatrix.needsUpdate = true;
+}
+
+/* 落地姿态：整机绕（底面中心、x 轴）回转，让外壳的**斜面正好平行于桌面** ——
+ * 也就是外壳真正坐在自己的斜面上（放在桌上不会再是翘着的）。 */
+function caseRestMatrix(a, yBot, zMid) {
+  return new THREE.Matrix4().makeTranslation(0, yBot, zMid)
+    .multiply(new THREE.Matrix4().makeRotationX(a))
+    .multiply(new THREE.Matrix4().makeTranslation(0, -yBot, -zMid));
+}
+
+function buildCase(keys, bounds, pm, mat) {
+  const W = bounds.W, H = bounds.H;
+  /* 外壳侧视斜坡位场：斜面就是底面；上面保持方正水平 */
+  const WED = { k: CASE_K, zMid: H / 2, yBot: CASE_BOT, yTop: TOP_BOT };
+  const REST = caseRestMatrix(CASE_ANG, CASE_BOT, H / 2);   // 落地姿态：斜面平行桌面
+  const parts = [];                       // 定位板/下壳/边框之外的附属件
+  const mats = [mat];
+  const pcbMat = new THREE.MeshStandardMaterial({ color: 0x14251c, roughness: 0.6, metalness: 0.08 });
+  const plasticMat = new THREE.MeshStandardMaterial({ color: 0x15171c, roughness: 0.55, metalness: 0.12 });
+  const metalMat = new THREE.MeshStandardMaterial({
+    color: 0xc9ced6, roughness: 0.25, metalness: 0.85,
+    envMap: makeStudioEnv(), envMapIntensity: 0.8
+  });
+  const rubberMat = new THREE.MeshStandardMaterial({ color: 0x0c0d10, roughness: 0.95, metalness: 0 });
+  mats.push(pcbMat, plasticMat, metalMat, rubberMat);
+
+  /* ----- 定位板：每键 14mm 方孔 + 卫星轴过孔 ----- */
+  const s = new THREE.Shape();
+  s.moveTo(-PLATE_PM, -PLATE_PM);
+  s.lineTo(W + PLATE_PM, -PLATE_PM);
+  s.lineTo(W + PLATE_PM, H + PLATE_PM);
+  s.lineTo(-PLATE_PM, H + PLATE_PM);
+  s.closePath();
+  const r = MX.hole / 2;
+  const sh = REF.stabHole / 2;
+  for (const k of keys) {
+    s.holes.push(sqPath(k.x + k.w / 2, k.y + k.h / 2, r));
+    for (const [px, pz] of stabPositions(k)) s.holes.push(sqPath(px, pz, sh));
+  }
+  const pg = new THREE.ExtrudeGeometry(s, { depth: MX.plateT, bevelEnabled: false });
+  pg.rotateX(Math.PI / 2);                // shape 的 (x,y) → 世界 (x,z)，厚度朝下
+  const plate = new THREE.Mesh(pg, mat);
+  plate.receiveShadow = true;
+
+  /* ----- 外壳 -----
+     上盖：环形（内口 = 键位区、外轮廓圆角），从 CASE_LIP 到 TOP_BOT。
+     下壳：真正的壳件 —— 底板 + C 形三面壁（前 + 左右）+ 带 USB-C 开孔的后壁 + 两根后角圆柱，
+           壁厚 WALL_T，内部是空的（PCB / 轴座 / 卫星轴装在腔里）；整体内缩 SEAM 形成分模线。 */
+  const mkCase = (shape, yTop, yBot) => {
+    const g = new THREE.ExtrudeGeometry(shape, { depth: yTop - yBot, bevelEnabled: false });
+    g.rotateX(Math.PI / 2);              // shape 的 (x,y) → 世界 (x,z)，厚度朝下
+    g.translate(0, yTop, 0);
+    const m = new THREE.Mesh(g, mat);
+    m.receiveShadow = true;
+    return m;
+  };
+  /* 上盖按高度分三段叠起来（高边框做法）：
+     板面以上 → 上沿 8mm：内口比键位区大 INNER_GAP，键帽下半截就落在这一段里；
+     板面以下 0 ~ −1.5mm：内口放大到 PLATE_SLOT，是定位板的卡槽；
+     −1.5mm 以下：内口收到 INNER_GAP，形成承托定位板的一圈台阶。 */
+  const topSeg = (yTop, yBot, half) => {
+    const sh = roundRectShape(-pm, -pm, W + pm, H + pm, CASE_R, new THREE.Shape());
+    sh.holes.push(roundRectShape(-half, -half, W + half, H + half, 0.08, new THREE.Path()));
+    return mkCase(sh, yTop, yBot);
+  };
+  const caseTopUp = topSeg(CASE_LIP, 0, INNER_GAP);            // 高边框：围住键帽下半截
+  const caseTopSlot = topSeg(0, -MX.plateT, PLATE_SLOT);       // 定位板卡槽
+  const caseTopLo = topSeg(-MX.plateT, TOP_BOT, INNER_GAP);    // 承托定位板的台阶
+  const rims = [caseTopUp, caseTopSlot, caseTopLo];
+
+  const bx0 = -pm + SEAM, bx1 = W + pm - SEAM;
+  const bz0 = -pm + SEAM, bz1 = H + pm - SEAM;
+  const bR = CASE_R - SEAM, wallT = WALL_T;
+  const caseMesh = mkCase(roundRectShape(bx0, bz0, bx1, bz1, bR, new THREE.Shape()),
+    CASE_BOT + wallT, CASE_BOT);                                   // 底板
+  const caseC = mkCase(cRingShape(bx0, bz0, bx1, bz1, bR, wallT, bz0 + wallT),
+    TOP_BOT, CASE_BOT + wallT);                                    // 前 + 左右壁
+
+  /* 后壁：整块板，中间挖 USB-C 开孔（沿 z 挤出，形状在 XY 平面） */
+  const usbY = TOP_BOT - 0.12;
+  const backShape = new THREE.Shape();
+  backShape.moveTo(bx0, CASE_BOT + wallT);
+  backShape.lineTo(bx1, CASE_BOT + wallT);
+  backShape.lineTo(bx1, TOP_BOT);
+  backShape.lineTo(bx0, TOP_BOT);
+  backShape.closePath();
+  backShape.holes.push(roundRectShape(
+    W / 2 - PCUT[0] / 2, usbY - PCUT[1] / 2,
+    W / 2 + PCUT[0] / 2, usbY + PCUT[1] / 2, PCUT[2], new THREE.Path()));
+  const backWall = new THREE.Mesh(
+    new THREE.ExtrudeGeometry(backShape, { depth: wallT, bevelEnabled: false }), mat);
+  backWall.position.z = bz0;
+  backWall.receiveShadow = true;
+
+  /* 后角圆柱：把后壁与侧壁交出的直角补成圆角 */
+  const cornerH = TOP_BOT - CASE_BOT - wallT;
+  const cornerGeo = new THREE.CylinderGeometry(bR, bR, cornerH, 20);
+  [[bx0 + bR, bz0 + bR], [bx1 - bR, bz0 + bR]].forEach(([cx, cz]) => {
+    const m = new THREE.Mesh(cornerGeo.clone(), mat);   // 各自一份：后面加斜面要按各自位置变形
+    m.position.set(cx, CASE_BOT + wallT + cornerH / 2, cz);
+    m.receiveShadow = true;
+    parts.push(m);
+  });
+  parts.push(caseC, backWall);
+
+  /* ----- USB-C 插座：金属外壳环（深 6.5mm，与壁面齐平）+ 腔底 + 舌片 ----- */
+  const [shW, shH, shR] = REF.usbShell;
+  const [moW, moH, moR] = REF.usbMouth;
+  const shellRing = roundRectShape(-shW / 2, -shH / 2, shW / 2, shH / 2, shR, new THREE.Shape());
+  shellRing.holes.push(roundRectShape(-moW / 2, -moH / 2, moW / 2, moH / 2, moR, new THREE.Path()));
+  const usbShell = new THREE.Mesh(
+    new THREE.ExtrudeGeometry(shellRing, { depth: 6.5 / 19.05, bevelEnabled: false }), metalMat);
+  usbShell.position.set(W / 2, usbY, bz0);                 // 口面与壁面齐平，沿 +z 伸进壳内 6.5mm
+  const usbBack = new THREE.Mesh(
+    new THREE.ExtrudeGeometry(
+      roundRectShape(-moW / 2, -moH / 2, moW / 2, moH / 2, moR, new THREE.Shape()),
+      { depth: 0.4 / 19.05, bevelEnabled: false }), rubberMat);
+  usbBack.position.set(W / 2, usbY, bz0 + 6.1 / 19.05);    // 腔底
+  const usbTongue = new THREE.Mesh(
+    new THREE.BoxGeometry(REF.usbTongue[0], REF.usbTongue[1], 5.4 / 19.05), metalMat);
+  usbTongue.position.set(W / 2, usbY, bz0 + 3.9 / 19.05);  // 舌片：口内 1.2mm 起，长 5.4mm
+  parts.push(usbShell, usbBack, usbTongue);
+
+  /* ----- 前侧边框：铭牌 ----- */
+  const badgeMat = new THREE.MeshStandardMaterial({
+    map: badgeTexture(), roughness: 0.3, metalness: 0.75,
+    envMap: makeStudioEnv(), envMapIntensity: 0.7
+  });
+  mats.push(badgeMat);
+  const badgeGeo = new THREE.PlaneGeometry(0.9, 0.16);
+  badgeGeo.rotateX(-Math.PI / 2);            // 旋转烘进几何，便于后面按世界坐标加斜面
+  const badge = new THREE.Mesh(badgeGeo, badgeMat);
+  badge.position.set(W / 2, CASE_LIP + 0.002, H + pm / 2);
+  parts.push(badge);
+
+  /* ----- 脚垫：PH60 BOM 规格 20×10×2 硅胶垫 ×4 ----- */
+  const padGeo = new THREE.ExtrudeGeometry(
+    roundRectShape(-0.52, -0.26, 0.52, 0.26, 0.08, new THREE.Shape()),
+    { depth: 2 / 19.05, bevelEnabled: false });
+  padGeo.rotateX(Math.PI / 2);          // 厚度朝下
+  const padAt = (px, pz) => {
+    const m = new THREE.Mesh(padGeo.clone(), rubberMat);   // 各自一份：脚垫要跟着底面斜度各自动变形
+    m.position.set(px, CASE_BOT, pz);
+    parts.push(m);
+  };
+  [[0.6, 0.6], [W - 0.6, 0.6], [0.6, H - 0.6], [W - 0.6, H - 0.6]].forEach(([px, pz]) => padAt(px, pz));
+
+  /* ----- 脚撑：PH60 是两级（7°/0°）折叠脚，这里按 0° 折叠态放在后侧 ----- */
+  [W * 0.28, W * 0.72].forEach(px => padAt(px, -pm + 0.3));
+
+  /* ----- PCB：1.6mm，位于板面下 6.5mm ----- */
+  const pcbIns = 0.12;
+  const pcb = new THREE.Mesh(
+    new THREE.BoxGeometry(W + 2 * pm - 2 * pcbIns, REF.pcbT, H + 2 * pm - 2 * pcbIns), pcbMat);
+  pcb.position.set(W / 2, PCB_Y - REF.pcbT / 2, H / 2);
+  pcb.receiveShadow = true;
+  parts.push(pcb);
+
+  /* ----- 热插拔轴座：每键一个，贴在 PCB 下面 ----- */
+  const [sockW, sockD, sockH] = REF.socket;
+  const socks = new THREE.InstancedMesh(new THREE.BoxGeometry(sockW, sockH, sockD), plasticMat, keys.length);
+  const m4 = new THREE.Matrix4();
+  keys.forEach((k, i) => {
+    m4.makeTranslation(k.x + k.w / 2, PCB_Y - REF.pcbT - sockH / 2, k.y + k.h / 2);
+    socks.setMatrixAt(i, m4);
+  });
+  socks.instanceMatrix.needsUpdate = true;
+  socks.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+  socks.frustumCulled = false;
+  parts.push(socks);
+
+  /* ----- 卫星轴：板下轴座 + 穿板的十字轴心 + Ø1.6 钢丝 ----- */
+  const houseH = MX.plateT + REF.pcbGap;             // 板下沿 → PCB 面
+  const yb = -MX.plateT, yt = MX.upperH + MX.crossH; // 轴心：板的下面 → 与轴体同高
+  const bh = yt - yb;
+  for (const k of keys) {
+    const stabs = stabPositions(k);
+    if (!stabs.length) continue;
+    const horiz = k.w >= k.h;
+    for (const [sx, sz] of stabs) {
+      const house = new THREE.Mesh(new THREE.BoxGeometry(0.31, houseH, 0.31), plasticMat);
+      house.position.set(sx, -houseH / 2, sz);
+      const bladeA = new THREE.Mesh(new THREE.BoxGeometry(MX.arm, bh, MX.cross), plasticMat);
+      bladeA.position.set(sx, (yb + yt) / 2, sz);
+      const bladeB = new THREE.Mesh(new THREE.BoxGeometry(MX.cross, bh, MX.arm), plasticMat);
+      bladeB.position.set(sx, (yb + yt) / 2, sz);
+      parts.push(house, bladeA, bladeB);
+    }
+    /* 钢丝：两端插进轴座，中间横杆从轴体下壳外侧绕过去 */
+    const [p0, p1] = stabs;
+    const off = 0.42;                                 // 绕开 13.9mm 轴体下壳所需的偏移
+    const yTop = -MX.plateT - 0.02, yMid = -MX.plateT - REF.pcbGap * 0.55;
+    const dx = horiz ? 0 : off, dz = horiz ? off : 0;
+    const V = (x, y, z) => new THREE.Vector3(x, y, z);
+    const path = new THREE.CurvePath();
+    path.add(new THREE.LineCurve3(V(p0[0], yTop, p0[1]), V(p0[0], yMid, p0[1])));
+    path.add(new THREE.LineCurve3(V(p0[0], yMid, p0[1]), V(p0[0] - dx, yMid, p0[1] - dz)));
+    path.add(new THREE.LineCurve3(V(p0[0] - dx, yMid, p0[1] - dz), V(p1[0] + dx, yMid, p1[1] - dz)));
+    path.add(new THREE.LineCurve3(V(p1[0] + dx, yMid, p1[1] - dz), V(p1[0], yMid, p1[1])));
+    path.add(new THREE.LineCurve3(V(p1[0], yMid, p1[1]), V(p1[0], yTop, p1[1])));
+    parts.push(new THREE.Mesh(new THREE.TubeGeometry(path, 24, REF.wire / 2, 6, false), metalMat));
+  }
+
+  return { plate, caseMesh, rims, parts, mats, wedge: WED, rest: REST };
 }
 
 /* ---------- 通用视图 ---------- */
@@ -418,7 +909,10 @@ class View {
     fill.position.set(7, 4, -6);
     const rim = new THREE.DirectionalLight(0xffffff, 0.5);
     rim.position.set(0, 10, -3);
-    this.scene.add(amb, key, fill, rim);
+    /* 底部反弹光：从下往上看键帽腔体/底面时不至于一片黑 */
+    const bounce = new THREE.DirectionalLight(0xd8e4ff, 0.5);
+    bounce.position.set(1, -8, 4);
+    this.scene.add(amb, key, fill, rim, bounce);
     this.scene.environment = makeStudioEnv();
 
     this.keys = [];
@@ -430,18 +924,27 @@ class View {
     this._stems = [];                // 轴体实例化网格（3 次 draw call）
     this._m4 = new THREE.Matrix4();
     this._plate = null;
+    this._case = null;
+    this._rims = [];
+    this._parts = [];
+    this._mats = [];
     this._targetKey = null;
     this._targetDesign = null;
     this._singleCap = null;
     this._singlePlate = null;
+    this._singleCase = null;
+    this._singleRims = [];
+    this._singleParts = [];
+    this._singleMats = [];
     this._raycaster = new THREE.Raycaster();
     this.selected = -1;
 
     /* 共享轴体几何/材质 */
     this._stemMat = new THREE.MeshStandardMaterial({ color: STEM, roughness: 0.5, metalness: 0.15 });
-    this._housingGeo = new THREE.BoxGeometry(0.52, 0.3, 0.52);
-    this._stemGeoA = new THREE.BoxGeometry(0.13, 0.09, 0.42);
-    this._stemGeoB = new THREE.BoxGeometry(0.42, 0.09, 0.13);
+    this._housingGeo = new THREE.BoxGeometry(MX.upperW, MX.upperH, MX.upperW);   // 上盖
+    this._flangeGeo = new THREE.BoxGeometry(MX.flange, LOWER_H, MX.flange);      // 轴体下壳（填满定位板开孔、直达 PCB）
+    this._stemGeoA = new THREE.BoxGeometry(MX.arm, MX.crossH, MX.cross);         // 十字（沿 z）
+    this._stemGeoB = new THREE.BoxGeometry(MX.cross, MX.crossH, MX.arm);         // 十字（沿 x）
 
     this._bindPointer();
     /* 渲染循环必须免疫单帧异常：抛错时仍继续调度 rAF，否则画面永久冻结 */
@@ -466,24 +969,36 @@ class View {
     this._hasFRow = bounds.H >= 5.9;
     this.W = bounds.W; this.H = bounds.H;
 
-    /* 底板：铝质定位板（接收键帽阴影） */
-    if (this._plate) {
-      this._group.remove(this._plate);
-      this._plate.geometry.dispose();
-      this._plate.material.dispose();
+    /* 底盘：定位板 + PCB + 轴座 + 卫星轴 + 外壳（材质由 buildCase 统一给出） */
+    for (const m of [this._plate, this._case].concat(this._rims || [], this._parts || [])) {
+      if (!m) continue;
+      this._group.remove(m);
+      m.geometry.dispose();
+      if (m.isInstancedMesh) m.dispose();
     }
+    for (const mt of (this._mats || [])) mt.dispose();
+    this._plate = null; this._case = null; this._rims = []; this._parts = []; this._mats = [];
+
     const pm = 0.35;
-    this._plate = new THREE.Mesh(
-      new THREE.BoxGeometry(bounds.W + 2 * pm, 0.42, bounds.H + 2 * pm),
-      new THREE.MeshStandardMaterial({
-        color: plateColor, roughness: 0.28, metalness: 0.6,
-        envMap: makeStudioEnv(), envMapIntensity: 0.85
-      }));
-    this._plate.receiveShadow = true;
-    this._plate.position.set(bounds.W / 2, -0.21, bounds.H / 2);
-    this._plate.updateMatrix();
-    this._plate.matrixAutoUpdate = false;
-    this._group.add(this._plate);
+    const body = buildCase(keys, bounds, pm, new THREE.MeshStandardMaterial({
+      color: plateColor, roughness: 0.28, metalness: 0.6,
+      envMap: makeStudioEnv(), envMapIntensity: 0.85
+    }));
+    this._plate = body.plate;
+    this._case = body.caseMesh;
+    this._rims = body.rims;
+    this._parts = body.parts;
+    this._mats = body.mats;
+    this._wedge = body.wedge;
+    this._rest = body.rest;                      // 落地姿态：斜面平放桌面
+    for (const m of [this._plate, this._case].concat(this._rims, this._parts)) {
+      if (m.isInstancedMesh) wedgeInstances(m, body.wedge);
+      else wedgeGeo(m.geometry, body.wedge, m.position.y, m.position.z);
+      m.updateMatrix();
+      m.matrixAutoUpdate = false;      // 静态件：几何即世界坐标，冻结矩阵
+      m.matrix.premultiply(this._rest);
+      this._group.add(m);
+    }
 
     keys.forEach((k, i) => this._buildCap(k, designs[i], i, k.x, k.y, false));
     this._buildStems(keys);
@@ -504,33 +1019,26 @@ class View {
     /* 单材质：顶面/四壁共用展开图纹理；透明用于顶面圆角 */
     const mat = new THREE.MeshStandardMaterial({
       map: tex, transparent: true, roughness: 0.35, metalness: 0.05,
+      side: THREE.DoubleSide,          // 底部开口：内壁也要能看见（否则看穿到背景）
       envMap: makeStudioEnv(), envMapIntensity: 0.6
     });
 
-    const mesh = new THREE.Mesh(capGeometry(k, rowP, dims), mat);
+    const mesh = new THREE.Mesh(capGeometry(k, rowP, dims, single), mat);
     mesh.position.set(px, FLOAT, py);
     mesh.updateMatrix();
     mesh.matrixAutoUpdate = false;   // 静态物件：冻结世界矩阵
+    if (this._rest) mesh.matrix.premultiply(this._rest);       // 随外壳落地姿态
     mesh.userData.index = single ? -1 : index;
     this._group.add(mesh);
 
-    /* 轴体上座 + 十字轴心：仅单键模式独立创建（整盘走 InstancedMesh） */
-    let housing = null, stemA = null, stemB = null;
-    if (single) {
-      housing = new THREE.Mesh(this._housingGeo, this._stemMat);
-      housing.position.set(px + k.w / 2, 0.17, py + k.h / 2);
-      stemA = new THREE.Mesh(this._stemGeoA, this._stemMat);
-      stemA.position.set(px + k.w / 2, 0.36, py + k.h / 2);
-      stemB = new THREE.Mesh(this._stemGeoB, this._stemMat);
-      stemB.position.set(px + k.w / 2, 0.36, py + k.h / 2);
-      this._group.add(housing, stemA, stemB);
-    }
+    /* 轴体只在整盘视图里出现（InstancedMesh）；单键预览只画键帽本身 */
+    let flange = null, housing = null, stemA = null, stemB = null;
 
     const cap = {
       mesh, mat, tex, canvas, dims, k, index,
       d: d || null,
       v: -1, wrapState: null,        // 纹理内容版本 / 包裹状态
-      housing, stemA, stemB
+      flange, housing, stemA, stemB
     };
     this.caps.push(cap);
     this.capMeshes.push(mesh);
@@ -553,13 +1061,15 @@ class View {
       im.instanceMatrix.needsUpdate = true;
       im.instanceMatrix.setUsage(THREE.StaticDrawUsage);
       im.matrixAutoUpdate = false;
+      if (this._rest) im.matrix.premultiply(this._rest);
       im.frustumCulled = false;      // 实例包围球不含实例位移
       this._group.add(im);
       this._stems.push(im);
     };
-    mk(this._housingGeo, 0.17);
-    mk(this._stemGeoA, 0.36);
-    mk(this._stemGeoB, 0.36);
+    mk(this._flangeGeo, MX_Y.flange);
+    mk(this._housingGeo, MX_Y.housing);
+    mk(this._stemGeoA, MX_Y.stem);
+    mk(this._stemGeoB, MX_Y.stem);
   }
 
   _clearStems() {
@@ -606,27 +1116,19 @@ class View {
     this._targetKey = k;
     this._targetDesign = d;
     if (this._singleCap) { this._removeCap(this._singleCap); this._singleCap = null; }
-    if (this._singlePlate) {
-      this.scene.remove(this._singlePlate);
-      this._singlePlate.geometry.dispose();
-      this._singlePlate.material.dispose();
-      this._singlePlate = null;
+    for (const m of [this._singlePlate, this._singleCase].concat(this._singleRims || [], this._singleParts || [])) {
+      if (!m) continue;
+      this.scene.remove(m);
+      m.geometry.dispose();
+      if (m.isInstancedMesh) m.dispose();
     }
+    for (const mt of (this._singleMats || [])) mt.dispose();
+    this._singlePlate = null; this._singleCase = null;
+    this._singleRims = []; this._singleParts = []; this._singleMats = [];
     if (!k) return;
 
-    const pm = 0.55;
-    this._singlePlate = new THREE.Mesh(
-      new THREE.BoxGeometry(k.w + 2 * pm, 0.42, k.h + 2 * pm),
-      new THREE.MeshStandardMaterial({
-        color: this.plateColor, roughness: 0.28, metalness: 0.6,
-        envMap: makeStudioEnv(), envMapIntensity: 0.85
-      }));
-    this._singlePlate.receiveShadow = true;
-    this._singlePlate.position.set(k.w / 2, -0.21, k.h / 2);
-    this._singlePlate.updateMatrix();
-    this._singlePlate.matrixAutoUpdate = false;
-    this.scene.add(this._singlePlate);
-
+    /* 只看键帽本身：不带定位板/PCB/轴座/外壳，也不做落地倾斜（正姿便于看形与刻字） */
+    this._rest = null;
     this._singleCap = this._buildCap(k, d, 0, 0, 0, true, rowParams);
     this._needsRender = true;
     this.renderer.shadowMap.needsUpdate = true;
@@ -637,7 +1139,7 @@ class View {
     c.mesh.geometry.dispose();
     c.mat.dispose();
     c.tex.dispose();
-    [c.housing, c.stemA, c.stemB].forEach(m => { if (m) this._group.remove(m); });
+    [c.flange, c.housing, c.stemA, c.stemB].forEach(m => { if (m) this._group.remove(m); });
   }
 
   _clearCaps() {
