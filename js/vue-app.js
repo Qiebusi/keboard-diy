@@ -70,6 +70,11 @@
         plateColor: "#23252f",
         profile: "oem",        // 键帽高度档案
         mode: "flat",          // flat | 3d
+        explode: false,        // 3D 分层拆解
+        explodeGap: 1,         // 层间距倍数
+        layerVis: {            // 各层显示开关（自下而上：下壳 → … → 键帽）
+          bottom: true, pcb: true, plate: true, rims: true, switch: true, cap: true
+        },
         designCounter: 0       // 设计变更计数（per-key .v，驱动 3D 纹理刷新）
       });
 
@@ -242,6 +247,8 @@
         });
         boardView.setScene(state.keys, state.designs, state.plateColor, state.profile);
         boardView.setSelected(state.selected);
+        boardView.setExplode(state.explode, state.explodeGap);
+        boardView.setLayerVisible(state.layerVis);
         boardView.setActive(true);
         applyViewBg();
         window.__dbv = boardView; /* 调试用 */
@@ -252,6 +259,8 @@
         boardView.setScene(state.keys, state.designs, state.plateColor, state.profile);
         boardView.setSelected(state.selected);
         boardView.setPlateColor(state.plateColor);
+        boardView.setExplode(state.explode, state.explodeGap);
+        boardView.setLayerVisible(state.layerVis);
         if (state.selected != null) {
           singleView.setTarget(state.keys[state.selected], state.designs[state.selected],
             keycapProfileFor(state.keys[state.selected], layoutBounds(state.keys).H >= 5.9, state.profile));
@@ -453,6 +462,42 @@
         buildLayout(getLayoutRows(e.target.value), e.target.value, true);
       }
 
+      /* 3D 分层拆解：像楼层一样把键盘按层拆开 */
+      function toggleExplode() {
+        state.explode = !state.explode;
+        if (boardView) {
+          boardView.setActive(true);
+          boardView.setExplode(state.explode, state.explodeGap);
+        }
+        toast(state.explode ? "分层展开：自下而上拆开查看" : "已收起分层");
+      }
+
+      function setExplodeGap(v) {
+        state.explodeGap = v;
+        if (boardView) boardView.setExplode(state.explode, state.explodeGap);
+      }
+
+      /* 层列表（自上而下，和画面里"楼上楼下"一致）；可逐层显示 / 隐藏 */
+      const layerList = [
+        { id: "cap", name: "键帽" },
+        { id: "switch", name: "轴体" },
+        { id: "rims", name: "上盖边框" },
+        { id: "plate", name: "定位板" },
+        { id: "pcb", name: "PCB·轴座·卫星轴" },
+        { id: "bottom", name: "下壳" }
+      ];
+      const layerCount = computed(() => layerList.filter(L => state.layerVis[L.id]).length);
+
+      function toggleLayer(id) {
+        state.layerVis[id] = !state.layerVis[id];
+        if (boardView) boardView.setLayerVisible(state.layerVis);
+      }
+
+      function showAllLayers() {
+        for (const L of layerList) state.layerVis[L.id] = true;
+        if (boardView) boardView.setLayerVisible(state.layerVis);
+      }
+
       function setMode(m) {
         if (m === state.mode) return;
         if (m === "3d") {
@@ -472,6 +517,8 @@
             if (boardView) {
               boardView.setActive(true);
               boardView.setSelected(state.selected);
+              boardView.setExplode(state.explode, state.explodeGap);
+              boardView.setLayerVisible(state.layerVis);
             }
             dirty = true;
           });
@@ -829,6 +876,7 @@
         curKey, curDesign, hasSel, keyTitle, keySub, autoLegend, netShow, imgWrapShown,
         /* 动作 */
         onLayoutChange, setMode, applyAll, resetKey, clearAll, applyGlobalColor,
+        toggleExplode, setExplodeGap, layerList, layerCount, toggleLayer, showAllLayers,
         legendAuto, onProfileChange, uploadClick, onImgFile, removeImg,
         importKLEClick, onKLEFile, exportBoard, exportKey, exportKey3d,
         saveProject, loadProjectClick, onProjFile, zoomOpen, zoomClose,

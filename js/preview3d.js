@@ -27,6 +27,14 @@ if (!window.THREE) {
 const PXU = 200;           // 纹理分辨率（px / u）
 const FOV = 40;
 const FLOAT = 0.34;        // 裙边底部离底板高度（露出轴体上座）
+/* ---------- 分层拆解（像楼层一样把键盘拆开看）----------
+ * 每件都归属一个"层"，展开时整层沿世界 Y 抬起，层间留出空隙。
+ * 自下而上：下壳 → PCB（轴座/卫星轴）→ 定位板 → 上盖边框 → 轴体 → 键帽 */
+const EXPLODE_STEP = 0.8;   // 每层抬升量（u；≈15.2mm）
+const EXPLODE_LAYERS = { bottom: 0, pcb: 1, plate: 2, rims: 3, switch: 4, cap: 5 };
+/* 层号 → 层名（自下而上） */
+const EXPLODE_NAMES = Object.keys(EXPLODE_LAYERS)
+  .sort((a, b) => EXPLODE_LAYERS[a] - EXPLODE_LAYERS[b]);
 const BP = 6;              // 展开图画布底部预留色条高度（底面采样区，px）
 const STEM = new THREE.Color(0x17181d);   // 轴体颜色
 const ACCENT = new THREE.Color(0xd9480f); // 选中强调色
@@ -670,6 +678,75 @@ function caseRestMatrix(a, yBot, zMid) {
     .multiply(new THREE.Matrix4().makeTranslation(0, -yBot, -zMid));
 }
 
+/* ---------- 键位开孔合并 ----------
+ * 相邻键帽之间不该有隔板：把每个键位矩形各向外放 m，再把相交的并成互不重叠的矩形。
+ * 并集正好是矩形（同向对齐 / 包含）就直接合并；否则精确做差，保证只吃掉键位本身，
+ * 布局里真正没有键的地方（留白、分组间隙）一点不动，仍然保留外壳塑料。 */
+function mergeKeyRects(keys, m) {
+  const eps = 1e-9;
+  const inter = (a, b) => [
+    Math.max(a[0], b[0]), Math.max(a[1], b[1]), Math.min(a[2], b[2]), Math.min(a[3], b[3])
+  ];
+  const area = r => Math.max(0, r[2] - r[0]) * Math.max(0, r[3] - r[1]);
+  /* b 扣掉 a 之后剩下的矩形（最多 4 块，只留面积 > 0 的） */
+  const subtract = (b, a) => {
+    const x0 = Math.max(a[0], b[0]), x1 = Math.min(a[2], b[2]);
+    const z0 = Math.max(a[1], b[1]), z1 = Math.min(a[3], b[3]);
+    if (x1 - x0 <= eps || z1 - z0 <= eps) return [b];      // 不相交
+    const r = [];
+    for (const q of [[b[0], b[1], b[2], z0], [b[0], z1, b[2], b[3]],
+                     [b[0], z0, x0, z1], [x1, z0, b[2], z1]]) {
+      if (area(q) > eps) r.push(q);
+    }
+    return r;
+  };
+  /* 反复扫，直到一轮下来完全合不动：先把每排并成整条，再把各排并成整片 */
+  let list = keys.map(k => [k.x - m, k.y - m, k.x + k.w + m, k.y + k.h + m]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const out = [];
+    while (list.length) {
+      const a = list.pop();
+      for (let i = list.length - 1; i >= 0; i--) {
+        const b = list[i];
+        const it = inter(a, b);
+        const ovx = it[2] - it[0], ovz = it[3] - it[1];
+        if (ovx < -eps || ovz < -eps) continue;                    // 有缝：不相交
+        const sameX = Math.abs(a[0] - b[0]) <= eps && Math.abs(a[2] - b[2]) <= eps;
+        const sameZ = Math.abs(a[1] - b[1]) <= eps && Math.abs(a[3] - b[3]) <= eps;
+        const bIn = b[0] >= a[0] - eps && b[2] <= a[2] + eps && b[1] >= a[1] - eps && b[3] <= a[3] + eps;
+        const aIn = a[0] >= b[0] - eps && a[2] <= b[2] + eps && a[1] >= b[1] - eps && a[3] <= b[3] + eps;
+        if (ovx <= eps || ovz <= eps) {                            // 只是相接：同向对齐才合
+          if (!sameX && !sameZ) continue;
+          a[0] = Math.min(a[0], b[0]); a[1] = Math.min(a[1], b[1]);
+          a[2] = Math.max(a[2], b[2]); a[3] = Math.max(a[3], b[3]);
+          list.splice(i, 1);
+          changed = true;
+          continue;
+        }
+        if (sameX || sameZ) {                                      // 并集仍是矩形 → 直接合
+          a[0] = Math.min(a[0], b[0]); a[1] = Math.min(a[1], b[1]);
+          a[2] = Math.max(a[2], b[2]); a[3] = Math.max(a[3], b[3]);
+          list.splice(i, 1);
+        } else if (bIn) {
+          list.splice(i, 1);
+        } else if (aIn) {
+          a[0] = b[0]; a[1] = b[1]; a[2] = b[2]; a[3] = b[3];
+          list.splice(i, 1);
+        } else {                                                   // 部分相交：精确做差
+          list.splice(i, 1);
+          for (const q of subtract(b, a)) list.push(q);
+        }
+        changed = true;
+      }
+      out.push(a);
+    }
+    list = out;
+  }
+  return list;
+}
+
 function buildCase(keys, bounds, pm, mat) {
   const W = bounds.W, H = bounds.H;
   /* 外壳侧视斜坡位场：斜面就是底面；上面保持方正水平 */
@@ -728,7 +805,20 @@ function buildCase(keys, bounds, pm, mat) {
   const caseTopUp = topSeg(CASE_LIP, 0, INNER_GAP);            // 高边框：围住键帽下半截
   const caseTopSlot = topSeg(0, -MX.plateT, PLATE_SLOT);       // 定位板卡槽
   const caseTopLo = topSeg(-MX.plateT, TOP_BOT, INNER_GAP);    // 承托定位板的台阶
-  const rims = [caseTopUp, caseTopSlot, caseTopLo];
+
+  /* 键位隔板：在沿口高度铺一层外壳塑料 —— 没有键帽的地方（键位区四周、布局里的
+     留白和分组间隙）看到的是外壳本体，而不是 8mm 深的键井和定位板。
+     开孔按"合并后的键位"来开：相邻键帽之间不留隔板，只有真正没有键的位置才有塑料。 */
+  const LID_T = 1.2 / 19.05;
+  const lidShape = roundRectShape(-pm, -pm, W + pm, H + pm, CASE_R, new THREE.Shape());
+  const holeM = 0.2 / 19.05;      // 开孔比键位各向外放 0.2mm：相邻键位互相咬合成一整片
+  const holeEps = 0.012 / 19.05;  // 洞口之间留 0.012mm 塑料，避免共边三角化
+  for (const [x0, z0, x1, z1] of mergeKeyRects(keys, holeM)) {
+    lidShape.holes.push(roundRectShape(
+      x0 + holeEps, z0 + holeEps, x1 - holeEps, z1 - holeEps, 0.02, new THREE.Path()));
+  }
+  const caseLid = mkCase(lidShape, CASE_LIP, CASE_LIP - LID_T);
+  const rims = [caseTopUp, caseTopSlot, caseTopLo, caseLid];
 
   const bx0 = -pm + SEAM, bx1 = W + pm - SEAM;
   const bz0 = -pm + SEAM, bz1 = H + pm - SEAM;
@@ -816,6 +906,7 @@ function buildCase(keys, bounds, pm, mat) {
     new THREE.BoxGeometry(W + 2 * pm - 2 * pcbIns, REF.pcbT, H + 2 * pm - 2 * pcbIns), pcbMat);
   pcb.position.set(W / 2, PCB_Y - REF.pcbT / 2, H / 2);
   pcb.receiveShadow = true;
+  pcb.userData.layer = "pcb";
   parts.push(pcb);
 
   /* ----- 热插拔轴座：每键一个，贴在 PCB 下面 ----- */
@@ -829,6 +920,7 @@ function buildCase(keys, bounds, pm, mat) {
   socks.instanceMatrix.needsUpdate = true;
   socks.instanceMatrix.setUsage(THREE.StaticDrawUsage);
   socks.frustumCulled = false;
+  socks.userData.layer = "pcb";
   parts.push(socks);
 
   /* ----- 卫星轴：板下轴座 + 穿板的十字轴心 + Ø1.6 钢丝 ----- */
@@ -846,6 +938,7 @@ function buildCase(keys, bounds, pm, mat) {
       bladeA.position.set(sx, (yb + yt) / 2, sz);
       const bladeB = new THREE.Mesh(new THREE.BoxGeometry(MX.cross, bh, MX.arm), plasticMat);
       bladeB.position.set(sx, (yb + yt) / 2, sz);
+      for (const sm of [house, bladeA, bladeB]) sm.userData.layer = "pcb";
       parts.push(house, bladeA, bladeB);
     }
     /* 钢丝：两端插进轴座，中间横杆从轴体下壳外侧绕过去 */
@@ -860,7 +953,9 @@ function buildCase(keys, bounds, pm, mat) {
     path.add(new THREE.LineCurve3(V(p0[0] - dx, yMid, p0[1] - dz), V(p1[0] + dx, yMid, p1[1] - dz)));
     path.add(new THREE.LineCurve3(V(p1[0] + dx, yMid, p1[1] - dz), V(p1[0], yMid, p1[1])));
     path.add(new THREE.LineCurve3(V(p1[0], yMid, p1[1]), V(p1[0], yTop, p1[1])));
-    parts.push(new THREE.Mesh(new THREE.TubeGeometry(path, 24, REF.wire / 2, 6, false), metalMat));
+    const wire = new THREE.Mesh(new THREE.TubeGeometry(path, 24, REF.wire / 2, 6, false), metalMat);
+    wire.userData.layer = "pcb";
+    parts.push(wire);
   }
 
   return { plate, caseMesh, rims, parts, mats, wedge: WED, rest: REST };
@@ -930,6 +1025,12 @@ class View {
     this._mats = [];
     this._targetKey = null;
     this._targetDesign = null;
+    this.explode = false;          // 分层拆解开关（整盘视图）
+    this.explodeGap = 1;           // 层间距倍数
+    this._ex = 0;                  // 当前展开量 0..1（缓动插值）
+    this._stepWritten = -1;        // 上次写进矩阵的每层抬升量（用于层距改动即时生效）
+    this._layerObjs = [];          // [物件, 原始矩阵, 层号]
+    this._layerVis = null;         // 各层显示开关（null = 全显）
     this._singleCap = null;
     this._singlePlate = null;
     this._singleCase = null;
@@ -991,6 +1092,7 @@ class View {
     this._mats = body.mats;
     this._wedge = body.wedge;
     this._rest = body.rest;                      // 落地姿态：斜面平放桌面
+    this._layerObjs = [];
     for (const m of [this._plate, this._case].concat(this._rims, this._parts)) {
       if (m.isInstancedMesh) wedgeInstances(m, body.wedge);
       else wedgeGeo(m.geometry, body.wedge, m.position.y, m.position.z);
@@ -998,10 +1100,79 @@ class View {
       m.matrixAutoUpdate = false;      // 静态件：几何即世界坐标，冻结矩阵
       m.matrix.premultiply(this._rest);
       this._group.add(m);
+      this._tag(m, m === this._plate ? "plate"
+        : (this._rims.indexOf(m) >= 0 ? "rims" : (m.userData.layer || "bottom")));
     }
 
     keys.forEach((k, i) => this._buildCap(k, designs[i], i, k.x, k.y, false));
     this._buildStems(keys);
+    this._ex = this.explode ? 1 : 0;
+    this._writeExplode();              // 重建后保持当前展开量
+    this._applyLayerVis();             // 重建后保持各层显示开关
+    this._needsRender = true;
+    this.renderer.shadowMap.needsUpdate = true;
+  }
+
+  /* ----- 分层拆解 ----- */
+  /* 登记一个分层件：记住它的原始世界矩阵，展开时在它前面左乘一个竖直位移 */
+  _tag(obj, layer) {
+    this._layerObjs.push([obj, obj.matrix.clone(), EXPLODE_LAYERS[layer] || 0]);
+    return obj;
+  }
+
+  /* 按当前展开量重写所有分层件的矩阵（层号越大抬得越高） */
+  _writeExplode() {
+    const step = EXPLODE_STEP * this.explodeGap * this._ex;
+    this._stepWritten = step;
+    if (!this._layerObjs.length) return;
+    for (const [obj, base, li] of this._layerObjs) {
+      const dy = step * li;
+      if (dy === 0) obj.matrix.copy(base);
+      else obj.matrix.makeTranslation(0, dy, 0).multiply(base);
+      obj.matrixWorldNeedsUpdate = true;
+    }
+    this._group.updateMatrixWorld(true);
+  }
+
+  /* 展开/收起的缓动；返回本帧是否有变化 */
+  _applyExplode() {
+    if (this.single || !this._layerObjs.length) return false;
+    const want = this.explode ? 1 : 0;
+    let moving = false;
+    if (Math.abs(this._ex - want) > 1e-4) {
+      this._ex += (want - this._ex) * 0.18;
+      if (Math.abs(want - this._ex) < 0.002) this._ex = want;
+      moving = true;
+    }
+    /* 层距（explodeGap）改动同样要立刻重写，不能只在展开量变化时重写 */
+    const step = EXPLODE_STEP * this.explodeGap * this._ex;
+    if (!moving && step === this._stepWritten) return false;
+    this._writeExplode();
+    this.renderer.shadowMap.needsUpdate = true;
+    return true;
+  }
+
+  /* 各层显示开关：map = { 层名: false } 的隐藏表（缺省/true 为显示） */
+  setLayerVisible(map) {
+    this._layerVis = { ...(map || {}) };
+    this._applyLayerVis();
+    this._needsRender = true;
+    this.renderer.shadowMap.needsUpdate = true;
+  }
+
+  _applyLayerVis() {
+    const v = this._layerVis;
+    if (!v || !this._layerObjs.length) return;
+    for (const [obj, , li] of this._layerObjs) {
+      obj.visible = v[EXPLODE_NAMES[li]] !== false;
+    }
+  }
+
+  /* 分层展开开关（gap：层间距倍数） */
+  setExplode(on, gap) {
+    this.explode = !!on;
+    if (gap != null) this.explodeGap = Math.max(0.3, Math.min(2.5, +gap || 1));
+    this._idleUntil = Date.now() + 2400;
     this._needsRender = true;
     this.renderer.shadowMap.needsUpdate = true;
   }
@@ -1023,13 +1194,15 @@ class View {
       envMap: makeStudioEnv(), envMapIntensity: 0.6
     });
 
-    const mesh = new THREE.Mesh(capGeometry(k, rowP, dims, single), mat);
+    /* 整盘视图也带上轴心柱 + 十字插槽：分层拆解后键帽底面是看得见的 */
+    const mesh = new THREE.Mesh(capGeometry(k, rowP, dims, true), mat);
     mesh.position.set(px, FLOAT, py);
     mesh.updateMatrix();
     mesh.matrixAutoUpdate = false;   // 静态物件：冻结世界矩阵
     if (this._rest) mesh.matrix.premultiply(this._rest);       // 随外壳落地姿态
     mesh.userData.index = single ? -1 : index;
     this._group.add(mesh);
+    if (!single) this._tag(mesh, "cap");
 
     /* 轴体只在整盘视图里出现（InstancedMesh）；单键预览只画键帽本身 */
     let flange = null, housing = null, stemA = null, stemB = null;
@@ -1070,6 +1243,7 @@ class View {
     mk(this._housingGeo, MX_Y.housing);
     mk(this._stemGeoA, MX_Y.stem);
     mk(this._stemGeoB, MX_Y.stem);
+    for (const im of this._stems) this._tag(im, "switch");
   }
 
   _clearStems() {
@@ -1234,8 +1408,10 @@ class View {
       target = new THREE.Vector3(k.w / 2, FLOAT + 0.15, k.h / 2);
       radius = 0.62 * Math.hypot(k.w, k.h) + 0.9;
     } else {
-      target = new THREE.Vector3(this.W / 2, FLOAT, this.H / 2);
-      radius = 0.62 * Math.hypot(this.W, this.H) + 1.2;
+      /* 分层展开：视点抬到拆解堆叠的中部，并适当退远 */
+      const ex = this._ex * this.explodeGap;
+      target = new THREE.Vector3(this.W / 2, FLOAT + 2.0 * ex, this.H / 2);
+      radius = (0.62 * Math.hypot(this.W, this.H) + 1.2) * (1 + 0.18 * ex);
     }
     const dist = radius / (Math.tan((FOV * Math.PI / 180) / 2) * Math.min(1, this.camera.aspect)) * 0.8 / this.orbit.zoom;
     const { yaw, elev } = this.orbit;
@@ -1254,6 +1430,7 @@ class View {
     let contentDirty = false;
     if (spinning) { this.orbit.yaw += 0.006; this._needsRender = true; }
     if (this._refreshCaps()) { this._needsRender = true; contentDirty = true; }
+    if (this._applyExplode()) { this._needsRender = true; contentDirty = true; }
     if (this._updateCamera()) { this._needsRender = true; contentDirty = true; }
     if (!this._needsRender) return;            // 静止帧：跳过渲染
     if (!contentDirty && performance.now() - (this._lastSpinRender || 0) < 40) {
@@ -1316,7 +1493,8 @@ class View {
       -((clientY - r.top) / r.height) * 2 + 1
     );
     this._raycaster.setFromCamera(ndc, this.camera);
-    const hits = this._raycaster.intersectObjects(this.capMeshes, false);
+    const vis = this.capMeshes.filter(m => m.visible);       // 隐藏的键帽不参与拾取
+    const hits = this._raycaster.intersectObjects(vis, false);
     return hits.length ? hits[0].object.userData.index : null;
   }
 

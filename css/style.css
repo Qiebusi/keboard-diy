@@ -206,6 +206,10 @@ input[type="range"]::-webkit-slider-thumb {
 
 .btn-grid { display: grid; grid-template-columns: 1fr; gap: 8px; }
 
+/* 分层拆解：各层显示开关 */
+.layer-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+.layer-grid .btn { flex: 1 1 auto; }
+
 /* ---------- 平面 / 3D 分段切换 ---------- */
 .mode-switch {
   display: flex;
