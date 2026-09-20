@@ -10,7 +10,7 @@ import {
   KEYCAP_PROFILES, parseKLE, getLayoutRows, layoutBounds, keycapProfileFor
 } from "../lib/layout.js";
 import { Render } from "../lib/render.js";
-import * as P3 from "../lib/preview3d.js";
+import * as P3 from "../lib/preview3d/index.js";
 
 export function useStudio() {
   const SAVE_KEY = "keycap-diy-v1";

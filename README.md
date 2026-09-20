@@ -30,7 +30,16 @@ npm run preview    # 本地预览 dist/
 | `src/composables/useStudio.js` | 应用状态与全部交互动作（Composition API） |
 | `src/lib/layout.js` | 布局：KLE 解析、内置布局、键帽高度档案 |
 | `src/lib/render.js` | 平面（Canvas 2D）键帽渲染 |
-| `src/lib/preview3d.js` | 3D 预览（Three.js）：键帽几何、底盘、分层拆解 |
+| `src/lib/preview3d/` | 3D 预览（Three.js）模块目录 |
+| ├ `spec.js` | 尺寸规格表（mm → u）：轴体 / 底盘 / 外壳 / 分层常量 |
+| ├ `textures.js` | 键帽纹理、环境贴图、铭牌纹理 |
+| ├ `paper.js` | 纸样展开：尺寸、UV 映射、顶面凹面、取模预览画布 |
+| ├ `capGeometry.js` | 键帽几何（裙边 / 锥度 / 分排倾角 / 凹面 / 轴心柱） |
+| ├ `shapes.js` | 2D 形状工具：Shape / Path、键位开孔合并 |
+| ├ `deform.js` | 外壳底面斜坡位场、落地姿态矩阵 |
+| ├ `caseAssembly.js` | 底盘装配：定位板 / 上下壳 / USB-C / PCB / 轴座 / 卫星轴 / 脚垫 |
+| ├ `View.js` | 视图类：渲染循环、相机轨道、分层拆解、拾取、截图 |
+| └ `index.js` | 对外 API：createBoardView / createSingleView / netDims / netOutline |
 | `src/styles/style.css` | 全局样式（两套主题） |
 
 ---
