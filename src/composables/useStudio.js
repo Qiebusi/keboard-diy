@@ -11,14 +11,13 @@ import {
 } from "../lib/layout.js";
 import { Render } from "../lib/render.js";
 import * as P3 from "../lib/preview3d/index.js";
+import { useI18n } from "./useI18n.js";
 
 export function useStudio() {
+  const { t } = useI18n();
   const SAVE_KEY = "keycap-diy-v1";
   const imgCache = new Map();   // dataURL -> HTMLImageElement
   let dirty = true;             // 平面重绘标记（模块级：getImg 回调也会触发）
-
-  const HINT_FLAT = "单击选中键帽<i>·</i>双击 / 拖入图片上传<i>·</i>拖拽移动图片<i>·</i>滚轮缩放图片<i>·</i>Ctrl+V 粘贴图片到选中键";
-  const HINT_3D = "拖拽旋转视角<i>·</i>滚轮缩放<i>·</i>单击选中 / 双击上传图片<i>·</i>右侧面板实时生效";
 
   /* ---------- 工具 ---------- */
   function debounce(fn, ms) {
@@ -56,8 +55,8 @@ export function useStudio() {
   }
 
   function keySizeText(k) {
-    const u = k.w === 1 && k.h === 1 ? "1u" : `${k.w}u${k.h > 1 ? ` × ${k.h}u 高` : ""}`;
-    return `${u} · ${Math.round(k.w * 19.05 * 10) / 10}mm 键距标准`;
+    const u = k.w === 1 && k.h === 1 ? "1u" : `${k.w}u${k.h > 1 ? t("panel.unitHigh", { h: k.h }) : ""}`;
+    return `${u} · ${t("panel.pitch", { mm: Math.round(k.w * 19.05 * 10) / 10 })}`;
   }
 
   /* ================= 响应式状态 ================= */
@@ -93,7 +92,7 @@ export function useStudio() {
   let toastTimer = null;
   const zoom3d = ref(false);
   const capColorAll = ref("#e9ecf5");
-  const hint = ref(HINT_FLAT);
+  const hint = computed(() => (state.mode === "3d" ? t("hint.3d") : t("hint.flat")));
 
   /* 界面主题：classic | tech（本地偏好，不属于工程数据） */
   const VIEW_BG = { classic: "#edeae3", tech: "#0f1626" };
@@ -121,7 +120,7 @@ export function useStudio() {
   const curKey = computed(() => state.selected != null ? state.keys[state.selected] : null);
   const curDesign = computed(() => state.selected != null ? state.designs[state.selected] : null);
   const hasSel = computed(() => !!curKey.value);
-  const keyTitle = computed(() => curKey.value ? (curKey.value.label || "（空格 / 无图例键）") : "");
+  const keyTitle = computed(() => curKey.value ? (curKey.value.label || t("panel.spaceKeyTitle")) : "");
   const keySub = computed(() => curKey.value ? keySizeText(curKey.value) : "");
   const autoLegend = computed(() =>
     curDesign.value ? (Render.luminance(curDesign.value.bg) > 0.55 ? "#3a3d46" : "#e8eaf2") : "#3a3d46");
@@ -339,7 +338,7 @@ export function useStudio() {
       touchDesign(d);
       state.selected = index;
       autosave();
-      toast("图片已应用到键帽");
+      toast(t("toast.imageApplied"));
     };
     reader.readAsDataURL(file);
   }
@@ -469,7 +468,7 @@ export function useStudio() {
       boardView.setActive(true);
       boardView.setExplode(state.explode, state.explodeGap);
     }
-    toast(state.explode ? "分层展开：自下而上拆开查看" : "已收起分层");
+    toast(state.explode ? t("toast.exploded") : t("toast.collapsed"));
   }
 
   function setExplodeGap(v) {
@@ -477,16 +476,11 @@ export function useStudio() {
     if (boardView) boardView.setExplode(state.explode, state.explodeGap);
   }
 
-  /* 层列表（自上而下，和画面里"楼上楼下"一致）；可逐层显示 / 隐藏 */
-  const layerList = [
-    { id: "cap", name: "键帽" },
-    { id: "switch", name: "轴体" },
-    { id: "rims", name: "上盖边框" },
-    { id: "plate", name: "定位板" },
-    { id: "pcb", name: "PCB·轴座·卫星轴" },
-    { id: "bottom", name: "下壳" }
-  ];
-  const layerCount = computed(() => layerList.filter(L => state.layerVis[L.id]).length);
+  /* 层列表（自上而下，和画面里"楼上楼下"一致）；可逐层显示 / 隐藏
+     名称走 t()，切语言时自动跟着变 */
+  const LAYER_IDS = ["cap", "switch", "rims", "plate", "pcb", "bottom"];
+  const layerList = computed(() => LAYER_IDS.map(id => ({ id, name: t("layer." + id) })));
+  const layerCount = computed(() => layerList.value.filter(L => state.layerVis[L.id]).length);
 
   function toggleLayer(id) {
     state.layerVis[id] = !state.layerVis[id];
@@ -502,7 +496,6 @@ export function useStudio() {
     if (m === state.mode) return;
     if (m === "3d") {
       state.mode = "3d";
-      hint.value = HINT_3D;
       nextTick(() => {
         if (board3dRef.value && scrollRef.value) {
           board3dRef.value.style.width = (scrollRef.value.clientWidth - 48) + "px";
@@ -520,7 +513,6 @@ export function useStudio() {
       });
     } else {
       state.mode = "flat";
-      hint.value = HINT_FLAT;
       if (boardView) boardView.setActive(false);
     }
   }
@@ -538,7 +530,7 @@ export function useStudio() {
       };
       touchDesign(state.designs[i]);
     });
-    toast("已应用到全部键帽");
+    toast(t("toast.appliedAll"));
   }
 
   function resetKey() {
@@ -552,7 +544,7 @@ export function useStudio() {
       state.designs[i] = defaultDesign(k);
       touchDesign(state.designs[i]);
     });
-    toast("已清空全部设计");
+    toast(t("toast.cleared"));
   }
 
   /* 全局键帽颜色：一次修改全部键帽底色（不影响图例/图片） */
@@ -570,12 +562,12 @@ export function useStudio() {
     const d = curDesign.value; if (!d) return;
     d.legendColor = null;
     touchDesign(d);
-    toast("图例颜色已恢复自动配色");
+    toast(t("toast.legendAuto"));
   }
 
   function onProfileChange(e) {
     state.profile = e.target.value;
-    toast("已切换键帽高度档案：" + e.target.selectedOptions[0].textContent);
+    toast(t("toast.profile", { name: e.target.selectedOptions[0].textContent }));
   }
 
   /* ================= KLE 导入 ================= */
@@ -595,9 +587,9 @@ export function useStudio() {
           throw new Error("格式不符");
         }
         buildLayout(rows, "custom", true);
-        toast("KLE 布局导入成功");
+        toast(t("toast.kleOk"));
       } catch (err) {
-        toast("导入失败：请提供 KLE 标准 JSON（二维数组）");
+        toast(t("toast.kleFail"));
       }
     };
     reader.readAsText(f);
@@ -615,7 +607,7 @@ export function useStudio() {
   function exportBoard() {
     if (state.mode === "3d" && boardView) {
       downloadURL(boardView.snapshot(2), `keycap-board-3d-${state.keys.length}keys.png`);
-      toast("3D 视角整盘 PNG 已导出");
+      toast(t("toast.exportBoard3d"));
       return;
     }
     const { W, H } = layoutBounds(state.keys);
@@ -629,12 +621,12 @@ export function useStudio() {
       U: eu, ins: flatInsets(), plateColor: state.plateColor, getImg, exportMode: true
     });
     downloadURL(cv.toDataURL("image/png"), `keycap-board-${state.keys.length}keys.png`);
-    toast("整盘 PNG 已导出");
+    toast(t("toast.exportBoard"));
   }
 
   function exportKey() {
     const i = state.selected;
-    if (i == null) { toast("请先选中一个键帽"); return; }
+    if (i == null) { toast(t("toast.needSelection")); return; }
     const k = state.keys[i];
     const eu = 512, pad = eu * 0.5;
     const cv = document.createElement("canvas");
@@ -648,16 +640,16 @@ export function useStudio() {
       { U: eu, ins: flatInsets(), getImg, exportMode: true });
     const name = (k.label || "space").replace(/[\\/:*?"<>|]/g, "_");
     downloadURL(cv.toDataURL("image/png"), `keycap-${name}-${k.w}u.png`);
-    toast("键帽 PNG 已导出");
+    toast(t("toast.exportKey"));
   }
 
   function exportKey3d() {
-    if (state.selected == null || !singleView) { toast("请先选中一个键帽"); return; }
+    if (state.selected == null || !singleView) { toast(t("toast.needSelection")); return; }
     const k = state.keys[state.selected];
     const name = (k.label || "space").replace(/[\\/:*?"<>|]/g, "_");
     /* 单键卡片画布只有一百多像素，按长边 ≥1024 放大渲染，导出才是高清图 */
     downloadURL(singleView.snapshot(2, 1024), `keycap-3d-${name}.png`);
-    toast("单键 3D PNG 已导出");
+    toast(t("toast.exportKey3d"));
   }
 
   /* ================= 工程保存 / 载入 ================= */
@@ -711,7 +703,7 @@ export function useStudio() {
     a.download = "keycap-project.json";
     a.click();
     URL.revokeObjectURL(a.href);
-    toast("工程文件已保存");
+    toast(t("toast.saved"));
   }
 
   function loadProjectClick() { if (projInputRef.value) projInputRef.value.click(); }
@@ -722,9 +714,9 @@ export function useStudio() {
     const reader = new FileReader();
     reader.onload = () => {
       try {
-        if (restoreProject(JSON.parse(reader.result))) toast("工程已载入");
-        else toast("工程文件格式不正确");
-      } catch { toast("工程文件解析失败"); }
+        if (restoreProject(JSON.parse(reader.result))) toast(t("toast.loaded"));
+        else toast(t("toast.badProject"));
+      } catch { toast(t("toast.parseFail")); }
     };
     reader.readAsText(f);
     e.target.value = "";
@@ -841,15 +833,21 @@ export function useStudio() {
     /* ---- Esc 关闭放大层 ---- */
     window.addEventListener("keydown", e => { if (e.key === "Escape") zoomClose(); });
 
-    /* ---- 窗口尺寸 ---- */
-    window.addEventListener("resize", debounce(() => {
+    /* ---- 画布尺寸变化：平面重新适配，3D 重设画布 ----
+       除窗口 resize 外，容器自身尺寸也会变（面板出现 / 布局生效），
+       首帧若在容器还没量到宽度时 fit，平面会被夹到 U 下限而一直偏小 */
+    const refitViews = debounce(() => {
       if (state.mode === "flat") {
         fitCanvas();
       } else if (boardView && board3dRef.value && scrollRef.value) {
         board3dRef.value.style.width = (scrollRef.value.clientWidth - 48) + "px";
         board3dRef.value.style.height = (scrollRef.value.clientHeight - 48) + "px";
       }
-    }, 150));
+    }, 150);
+    window.addEventListener("resize", refitViews);
+    if (typeof ResizeObserver !== "undefined" && scrollRef.value) {
+      new ResizeObserver(() => refitViews()).observe(scrollRef.value);
+    }
 
     /* ---- 初始化 ---- */
     buildLayout(getLayoutRows("60"), "60", false);
@@ -858,6 +856,8 @@ export function useStudio() {
       if (saved) restoreProject(JSON.parse(saved));
     } catch { /* 忽略 */ }
     fitCanvas();
+    nextTick(fitCanvas);              // 等布局生效后再量一次
+    requestAnimationFrame(fitCanvas);
 
     initViews();
 

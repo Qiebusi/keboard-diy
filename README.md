@@ -1,14 +1,20 @@
 # 键帽工坊 · Keycap Studio
 
+**简体中文** · [English](README.en.md)
+
 > 在浏览器里逐键设计机械键盘键帽 —— 底色、图例、图片贴图，平面 / 3D 实时预览，一键分层拆解看清内部结构，导出图片或工程文件。
-
-![平面视图](image/screenshot-flat.png)
-
-![3D 分层拆解](image/screenshot-3d-explode.png)
 
 键帽工坊是一个**纯前端的键帽设计工具**：左边是键盘主视图，右边是设计面板，点一颗键就能改它的样子，改完立刻在平面图和 3D 模型上看到效果。它不联网、没有后端，适合设计键帽配色套件、试颜色搭配、给键帽贴图，或者单纯把玩机械键盘的结构比例。
 
 技术栈：Vue 3 + Vite + Three.js（纯前端，可离线运行）。
+
+## 界面预览
+
+|  |  |
+|---|---|
+| ![平面设计视图](image/screenshot-flat.png)<br>**平面设计视图** —— 逐键改底色与图例，顶部切换布局 / 平面 · 3D | ![图片贴图](image/screenshot-key-image.png)<br>**图片贴图** —— 图案按十字展开包到键帽上，右侧是真实纸样预览 |
+| ![3D 整盘预览](image/screenshot-3d-board.png)<br>**3D 整盘** —— 分排高度与倾角，完整底盘（外壳 / 定位板 / PCB / 轴体） | ![分层拆解](image/screenshot-3d-explode.png)<br>**分层拆解** —— 六层展开、层间距可调、可逐层显示隐藏 |
+| ![单键 3D 放大](image/screenshot-key-zoom.png)<br>**单键 3D 放大** —— 选中键帽全屏旋转查看，可导出 | ![全尺寸布局](image/screenshot-full-size.png)<br>**内置四种布局** —— 60% / 75% / TKL / 104 键，也可导入 KLE |
 
 ---
 

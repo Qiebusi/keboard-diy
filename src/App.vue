@@ -5,7 +5,7 @@
     <BoardStage />
 
     <aside class="panel" id="panel">
-      <div class="panel-empty" v-if="!hasSel">在左侧点击一个键帽开始设计</div>
+      <div class="panel-empty" v-if="!hasSel">{{ t("panel.empty") }}</div>
       <KeyPanel v-else />
 
       <GlobalCard />
@@ -26,10 +26,11 @@
 /* =========================================================
  * 根组件：只负责布局与 provide 状态源
  * - 状态与动作集中在 composables/useStudio.js
- * - 子组件通过 inject("studio") 取用
+ * - 文案与语言在 composables/useI18n.js，子组件各自 t() 取词
  * ========================================================= */
-import { provide } from "vue";
+import { provide, watch } from "vue";
 import { useStudio } from "./composables/useStudio.js";
+import { useI18n } from "./composables/useI18n.js";
 
 import AppTopbar from "./components/AppTopbar.vue";
 import BoardStage from "./components/BoardStage.vue";
@@ -44,6 +45,13 @@ provide("studio", studio);
 
 /* 本组件模板用到的绑定（其余由子组件各自 inject） */
 const { state, hasSel, kleInputRef, projInputRef, onKLEFile, onProjFile } = studio;
+
+const { locale, t } = useI18n();
+/* 切换语言时同步 <html lang> 与页面标题 */
+watch(locale, l => {
+  document.documentElement.lang = l === "zh" ? "zh-CN" : "en";
+  document.title = t("app.docTitle");
+}, { immediate: true });
 
 /* 开发态调试句柄：浏览器控制台 / 自动化测试用 */
 if (import.meta.env.DEV) window.__studio = studio;
